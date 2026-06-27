@@ -63,6 +63,19 @@ fn render_onboarding(app: &mut App, ctx: &egui::Context) {
         .resizable(false)
         .show(ctx, |ui| {
             ui.set_width(440.0);
+            // Logo da marca no topo das boas-vindas.
+            if app.brand_texture.is_none() {
+                app.brand_texture = crate::app::load_brand_texture(ui.ctx());
+            }
+            if let Some(tex) = &app.brand_texture {
+                let [tw, th] = tex.size();
+                let w = 360.0_f32;
+                let h = w * th as f32 / tw.max(1) as f32;
+                ui.vertical_centered(|ui| {
+                    ui.add(egui::Image::from_texture((tex.id(), egui::vec2(w, h))));
+                });
+                ui.add_space(10.0);
+            }
             ui.label(
                 egui::RichText::new(if pt {
                     "Baixe vídeos e músicas de centenas de sites, converta arquivos e muito mais."
@@ -679,64 +692,44 @@ fn render_sidebar(app: &mut App, ctx: &egui::Context) {
                 }),
         )
         .show(ctx, |ui| {
-            // Marca "Lumen" + selo DOWNLOADER
+            // Logo da marca (logo + nome), carregado uma vez.
+            if app.brand_texture.is_none() {
+                app.brand_texture = crate::app::load_brand_texture(ui.ctx());
+            }
+            if let Some(tex) = &app.brand_texture {
+                let [tw, th] = tex.size();
+                let w = ui.available_width();
+                let h = (w * th as f32 / tw.max(1) as f32).min(48.0);
+                let w = h * tw as f32 / th.max(1) as f32;
+                ui.add(egui::Image::from_texture((tex.id(), egui::vec2(w, h))));
+            } else {
+                // Fallback textual se a imagem não carregar.
+                ui.label(egui::RichText::new("◆ Lumen").size(22.0).strong().color(theme::accent()));
+            }
+            ui.add_space(4.0);
+            // Ações rápidas: paleta de comandos (Ctrl+K) e destacar aba.
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("◆")
-                        .size(22.0)
-                        .color(theme::accent()),
-                );
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new("Lumen")
-                        .size(22.0)
-                        .strong()
-                        .color(theme::text()),
-                );
-                ui.add_space(4.0);
-                let badge = egui::Frame::none()
-                    .fill(theme::accent_soft())
-                    .rounding(egui::Rounding::same(5.0))
-                    .inner_margin(egui::Margin::symmetric(7.0, 3.0));
-                badge.show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("DOWNLOADER")
-                            .size(10.0)
-                            .strong()
-                            .color(theme::accent()),
-                    );
-                });
-                // Caixa de ferramentas rápida (abre a paleta de comandos / Ctrl+K).
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(egui::RichText::new("🧰").size(16.0))
-                                .fill(egui::Color32::TRANSPARENT),
-                        )
-                        .on_hover_text("Ctrl+K")
-                        .clicked()
-                    {
-                        app.cmd_palette_open = true;
-                        app.cmd_query.clear();
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("🧰").size(15.0)).fill(egui::Color32::TRANSPARENT))
+                    .on_hover_text("Ctrl+K")
+                    .clicked()
+                {
+                    app.cmd_palette_open = true;
+                    app.cmd_query.clear();
+                }
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("⧉").size(14.0)).fill(egui::Color32::TRANSPARENT))
+                    .on_hover_text(if app.config.lang == crate::ui::i18n::Lang::Pt {
+                        "Abrir aba em nova janela"
+                    } else {
+                        "Open tab in a new window"
+                    })
+                    .clicked()
+                {
+                    if !app.detached.contains(&app.active_tab) {
+                        app.detached.push(app.active_tab);
                     }
-                    // Destacar a aba atual numa janela própria.
-                    if ui
-                        .add(
-                            egui::Button::new(egui::RichText::new("⧉").size(15.0))
-                                .fill(egui::Color32::TRANSPARENT),
-                        )
-                        .on_hover_text(if app.config.lang == crate::ui::i18n::Lang::Pt {
-                            "Abrir aba em nova janela"
-                        } else {
-                            "Open tab in a new window"
-                        })
-                        .clicked()
-                    {
-                        if !app.detached.contains(&app.active_tab) {
-                            app.detached.push(app.active_tab);
-                        }
-                    }
-                });
+                }
             });
 
             ui.add_space(22.0);

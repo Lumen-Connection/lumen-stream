@@ -42,32 +42,39 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+// --- Paleta oficial Lumen Downloader (derivada do logo: ciano da marca + ---
+// --- fundos carvão com leve tom frio/azulado). ---
+
 // --- Fundos em camadas ---
 pub fn bg_app() -> Color32 {
-    if is_light() { rgb(0xf4, 0xf4, 0xf6) } else { rgb(0x0d, 0x0d, 0x10) }
+    if is_light() { rgb(0xf3, 0xf6, 0xf8) } else { rgb(0x0a, 0x0e, 0x12) }
 }
 pub fn bg_sidebar() -> Color32 {
-    if is_light() { rgb(0xea, 0xea, 0xee) } else { rgb(0x08, 0x08, 0x0a) }
+    if is_light() { rgb(0xe7, 0xed, 0xf1) } else { rgb(0x07, 0x0a, 0x0d) }
 }
 pub fn bg_card() -> Color32 {
-    if is_light() { rgb(0xff, 0xff, 0xff) } else { rgb(0x17, 0x17, 0x1b) }
+    if is_light() { rgb(0xff, 0xff, 0xff) } else { rgb(0x12, 0x18, 0x21) }
 }
 pub fn bg_card_hover() -> Color32 {
-    if is_light() { rgb(0xe7, 0xe7, 0xeb) } else { rgb(0x23, 0x23, 0x29) }
+    if is_light() { rgb(0xe4, 0xeb, 0xef) } else { rgb(0x1c, 0x25, 0x30) }
 }
 pub fn bg_input() -> Color32 {
-    if is_light() { rgb(0xff, 0xff, 0xff) } else { rgb(0x1c, 0x1c, 0x21) }
+    if is_light() { rgb(0xff, 0xff, 0xff) } else { rgb(0x16, 0x1d, 0x27) }
 }
 pub fn border() -> Color32 {
     if is_hc() {
-        return if is_light() { rgb(0x00, 0x00, 0x00) } else { rgb(0xc8, 0xc8, 0xd0) };
+        return if is_light() { rgb(0x00, 0x00, 0x00) } else { rgb(0xc8, 0xd0, 0xd6) };
     }
-    if is_light() { rgb(0xd6, 0xd6, 0xdc) } else { rgb(0x2a, 0x2a, 0x31) }
+    if is_light() { rgb(0xd2, 0xdb, 0xe1) } else { rgb(0x26, 0x32, 0x40) }
 }
 
-// --- Acento (laranja-avermelhado quente) ---
+// --- Acento (ciano da marca; mais vivo no escuro, mais profundo no claro) ---
 pub fn accent() -> Color32 {
-    rgb(0xff, 0x57, 0x22)
+    if is_light() {
+        rgb(0x0c, 0xa0, 0xc8) // ciano profundo (legível sobre claro)
+    } else {
+        rgb(0x2f, 0xd0, 0xee) // ciano vivo (brilha sobre escuro, como o logo)
+    }
 }
 pub fn accent_soft() -> Color32 {
     let a = accent();
@@ -84,24 +91,24 @@ fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
 }
 
-// --- Texto ---
+// --- Texto (tons levemente frios para combinar com o ciano) ---
 pub fn text() -> Color32 {
     if is_hc() {
         return if is_light() { rgb(0x00, 0x00, 0x00) } else { rgb(0xff, 0xff, 0xff) };
     }
-    if is_light() { rgb(0x1a, 0x1a, 0x1e) } else { rgb(0xf2, 0xf2, 0xf4) }
+    if is_light() { rgb(0x16, 0x20, 0x2a) } else { rgb(0xee, 0xf3, 0xf6) }
 }
 pub fn text_muted() -> Color32 {
     if is_hc() {
-        return if is_light() { rgb(0x20, 0x20, 0x24) } else { rgb(0xe0, 0xe0, 0xe6) };
+        return if is_light() { rgb(0x20, 0x20, 0x24) } else { rgb(0xe0, 0xe6, 0xea) };
     }
-    if is_light() { rgb(0x5a, 0x5a, 0x62) } else { rgb(0x9a, 0x9a, 0xa2) }
+    if is_light() { rgb(0x54, 0x61, 0x6c) } else { rgb(0x93, 0xa1, 0xad) }
 }
 pub fn text_faint() -> Color32 {
     if is_hc() {
-        return if is_light() { rgb(0x40, 0x40, 0x46) } else { rgb(0xc0, 0xc0, 0xc8) };
+        return if is_light() { rgb(0x40, 0x40, 0x46) } else { rgb(0xc0, 0xc6, 0xcc) };
     }
-    if is_light() { rgb(0x9a, 0x9a, 0xa2) } else { rgb(0x60, 0x60, 0x68) }
+    if is_light() { rgb(0x94, 0xa2, 0xac) } else { rgb(0x5a, 0x66, 0x70) }
 }
 
 pub fn danger() -> Color32 {

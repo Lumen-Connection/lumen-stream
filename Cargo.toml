@@ -6,6 +6,9 @@ edition = "2021"
 [patch.crates-io]
 lofty = { git = "https://github.com/boul2gom/lofty-rs", rev = "f8eef9d98b6fabe8514052375d16eb66e696fd88" }
 
+[build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 eframe = "0.27"
 egui = "0.27"
@@ -19,12 +22,18 @@ dirs = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fs2 = "0.4"
-arboard = "3"
+# sem a feature image-data (só usamos texto) — evita puxar image 0.25
+arboard = { version = "3", default-features = false }
 notify-rust = "4"
-image = "0.25"
-pdfium-render = "0.8"
+# image alinhado ao 0.24 (mesma versão que o eframe usa) p/ evitar duplicata.
+# feature "ico" garante a decodificação do ícone da janela.
+image = { version = "0.24", features = ["ico"] }
+# pdfium-render usando image 0.24 também (em vez do 0.25 padrão), p/ dedupe
+pdfium-render = { version = "0.8", default-features = false, features = ["pdfium_latest", "thread_safe", "image_024"] }
 printpdf = "0.7"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# reqwest alinhado ao 0.13 (mesma versão que o yt-dlp usa) p/ evitar duplicata.
+# Recursos unificam com os do yt-dlp por serem a mesma versão.
+reqwest = "0.13"
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }

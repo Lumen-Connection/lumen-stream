@@ -100,6 +100,8 @@ pub struct App {
     pub cmd_query: String,
     /// Sinaliza reaplicar o tema/estilo no próximo frame.
     pub restyle: bool,
+    /// Logo (logo + nome) exibido na sidebar — carregado uma vez.
+    pub brand_texture: Option<egui::TextureHandle>,
     /// Cache de texturas da galeria de miniaturas (por caminho).
     pub gallery_textures: HashMap<PathBuf, egui::TextureHandle>,
     /// Miniaturas de vídeos do histórico: texturas carregadas e geração em background.
@@ -305,6 +307,7 @@ impl App {
             inspector: Arc::new(Mutex::new(InspectorState::default())),
             info_window: Arc::new(Mutex::new(None)),
             qr_window: None,
+            brand_texture: None,
             pdf_reorder: None,
             tag_editor: None,
             bpm_result: Arc::new(Mutex::new(None)),
@@ -1496,6 +1499,15 @@ pub fn make_qr_texture(ctx: &egui::Context, data: &str) -> Option<egui::TextureH
     }
     let img = egui::ColorImage::from_rgba_unmultiplied([dim, dim], &rgba);
     Some(ctx.load_texture("qr_code", img, egui::TextureOptions::NEAREST))
+}
+
+/// Carrega o logo (logo + nome) embutido como textura egui.
+pub fn load_brand_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let bytes = include_bytes!("../assets/FULL LOGO LUMEN DOWLOADER PNG.png");
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &img);
+    Some(ctx.load_texture("brand_logo", color, egui::TextureOptions::LINEAR))
 }
 
 /// Carrega uma imagem do disco como textura egui (reduzida).
