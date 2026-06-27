@@ -20,6 +20,100 @@ pub fn sanitize_filename(name: &str) -> String {
     sanitized
 }
 
+/// Tags de áudio editáveis (ID3/Vorbis/etc.) — campos vazios = ausentes.
+#[derive(Clone, Default)]
+pub struct AudioTags {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub year: String,
+    pub genre: String,
+    pub track: String,
+    pub bpm: String,
+    pub key: String,
+}
+
+/// Lê as tags de um arquivo de áudio (best-effort).
+pub fn read_audio_tags(path: &str) -> AudioTags {
+    use lofty::prelude::{Accessor, ItemKey, TaggedFileExt};
+    let mut t = AudioTags::default();
+    let Ok(tagged) = lofty::read_from_path(path) else {
+        return t;
+    };
+    let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
+        return t;
+    };
+    t.title = tag.title().map(|c| c.to_string()).unwrap_or_default();
+    t.artist = tag.artist().map(|c| c.to_string()).unwrap_or_default();
+    t.album = tag.album().map(|c| c.to_string()).unwrap_or_default();
+    t.year = tag
+        .get_string(ItemKey::Year)
+        .or_else(|| tag.get_string(ItemKey::RecordingDate))
+        .unwrap_or_default()
+        .to_string();
+    t.genre = tag.genre().map(|c| c.to_string()).unwrap_or_default();
+    t.track = tag.track().map(|n| n.to_string()).unwrap_or_default();
+    t.bpm = tag
+        .get_string(ItemKey::IntegerBpm)
+        .or_else(|| tag.get_string(ItemKey::Bpm))
+        .unwrap_or_default()
+        .to_string();
+    t.key = tag.get_string(ItemKey::InitialKey).unwrap_or_default().to_string();
+    t
+}
+
+/// Grava as tags num arquivo de áudio.
+pub fn write_audio_tags(path: &str, t: &AudioTags) -> Result<(), Box<dyn std::error::Error>> {
+    use lofty::config::WriteOptions;
+    use lofty::prelude::{Accessor, ItemKey, TagExt, TaggedFileExt};
+    use lofty::tag::Tag;
+
+    let mut tagged = lofty::read_from_path(path)?;
+    let tag_type = tagged.primary_tag_type();
+    if tagged.primary_tag_mut().is_none() {
+        tagged.insert_tag(Tag::new(tag_type));
+    }
+    let tag = tagged
+        .primary_tag_mut()
+        .ok_or("não foi possível criar a tag")?;
+
+    if t.title.trim().is_empty() {
+        tag.remove_title();
+    } else {
+        tag.set_title(t.title.clone());
+    }
+    if t.artist.trim().is_empty() {
+        tag.remove_artist();
+    } else {
+        tag.set_artist(t.artist.clone());
+    }
+    if t.album.trim().is_empty() {
+        tag.remove_album();
+    } else {
+        tag.set_album(t.album.clone());
+    }
+    if !t.year.trim().is_empty() {
+        tag.insert_text(ItemKey::Year, t.year.trim().to_string());
+    }
+    if t.genre.trim().is_empty() {
+        tag.remove_genre();
+    } else {
+        tag.set_genre(t.genre.clone());
+    }
+    if let Ok(n) = t.track.trim().parse::<u32>() {
+        tag.set_track(n);
+    }
+    if !t.bpm.trim().is_empty() {
+        tag.insert_text(ItemKey::IntegerBpm, t.bpm.trim().to_string());
+    }
+    if !t.key.trim().is_empty() {
+        tag.insert_text(ItemKey::InitialKey, t.key.trim().to_string());
+    }
+
+    tag.save_to_path(path, WriteOptions::default())?;
+    Ok(())
+}
+
 /// Limpa "ruído" comum de títulos: [Official Video], (Audio), - Topic, etc.
 pub fn smart_clean_name(title: &str) -> String {
     const JUNK: &[&str] = &[
@@ -73,12 +167,29 @@ pub fn apply_template(template: &str, title: &str, channel: &str) -> String {
     s
 }
 
+/// Progresso de um download (fração 0..1, velocidade em bytes/s, ETA em segundos).
+#[derive(Clone, Copy, Default)]
+pub struct Progress {
+    pub fraction: f64,
+    pub speed_bps: f64,
+    pub eta_secs: u64,
+}
+
+/// Estatísticas de rede em tempo real (velocidade atual + histórico p/ gráfico).
+#[derive(Default)]
+pub struct NetStats {
+    pub current: f32, // bytes/s
+    pub history: Vec<f32>,
+}
+
 pub struct DownloadEngine {
     downloader: yt_dlp::Downloader,
     ffmpeg_path: PathBuf,
     libs_dir: PathBuf,
     /// Cache de pré-visualizações por URL (título/thumbnail/etc.) na sessão.
     preview_cache: Mutex<HashMap<String, VideoPreview>>,
+    /// Velocidade de download em tempo real (dashboard de rede).
+    net: Mutex<NetStats>,
 }
 
 fn binary_path(dir: &PathBuf, name: &str) -> PathBuf {
@@ -123,7 +234,35 @@ impl DownloadEngine {
             ffmpeg_path,
             libs_dir,
             preview_cache: Mutex::new(HashMap::new()),
+            net: Mutex::new(NetStats::default()),
         })
+    }
+
+    /// Velocidade de download atual (bytes/s) e histórico recente para o gráfico.
+    pub fn net_stats(&self) -> (f32, Vec<f32>) {
+        let n = self.net.lock().unwrap();
+        (n.current, n.history.clone())
+    }
+
+    /// Resolve a fonte: links do Spotify viram uma busca no YouTube (`ytsearch1:`)
+    /// pela faixa correspondente (o Spotify não é baixável diretamente).
+    pub async fn resolve_source(&self, url: &str) -> String {
+        let u = url.trim();
+        if u.contains("spotify.com/track") {
+            let api = format!("https://open.spotify.com/oembed?url={}", u);
+            if let Ok(resp) = reqwest::get(&api).await {
+                if let Ok(text) = resp.text().await {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(title) = json.get("title").and_then(|t| t.as_str()) {
+                            if !title.trim().is_empty() {
+                                return format!("ytsearch1:{}", title.trim());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        u.to_string()
     }
 
     pub async fn fetch_info(
@@ -242,6 +381,73 @@ impl DownloadEngine {
         Ok(())
     }
 
+    /// Estima o BPM de um áudio: extrai PCM mono com o ffmpeg e roda
+    /// autocorrelação do envelope de energia (aproximado).
+    pub async fn detect_bpm(&self, file: &str) -> Result<u32, Box<dyn std::error::Error>> {
+        const SR: usize = 11025;
+        const FRAME: usize = 512;
+        let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
+        cmd.arg("-i")
+            .arg(file)
+            .arg("-t")
+            .arg("90")
+            .arg("-ac")
+            .arg("1")
+            .arg("-ar")
+            .arg(SR.to_string())
+            .arg("-f")
+            .arg("s16le")
+            .arg("-");
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        let output = cmd.output().await?;
+        if !output.status.success() && output.stdout.is_empty() {
+            return Err("não foi possível ler o áudio".into());
+        }
+
+        // Envelope de energia por frame.
+        let samples: Vec<i16> = output
+            .stdout
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        if samples.len() < SR {
+            return Err("áudio muito curto".into());
+        }
+        let mut energy: Vec<f32> = Vec::new();
+        for frame in samples.chunks(FRAME) {
+            let e: f64 = frame.iter().map(|&s| (s as f64) * (s as f64)).sum();
+            energy.push((e / frame.len() as f64) as f32);
+        }
+        // Fluxo de onset (só aumentos de energia).
+        let onset: Vec<f32> = energy
+            .windows(2)
+            .map(|w| (w[1] - w[0]).max(0.0))
+            .collect();
+        if onset.len() < 32 {
+            return Err("áudio insuficiente para estimar BPM".into());
+        }
+
+        // Autocorrelação no intervalo de 60..180 BPM.
+        let frame_period = FRAME as f32 / SR as f32; // s por frame
+        let lag_for = |bpm: f32| ((60.0 / bpm) / frame_period).round() as usize;
+        let (lag_min, lag_max) = (lag_for(180.0).max(1), lag_for(60.0));
+        let mut best_lag = lag_min;
+        let mut best_val = f32::MIN;
+        for lag in lag_min..=lag_max.min(onset.len() / 2) {
+            let mut sum = 0.0f32;
+            for i in lag..onset.len() {
+                sum += onset[i] * onset[i - lag];
+            }
+            if sum > best_val {
+                best_val = sum;
+                best_lag = lag;
+            }
+        }
+        let bpm = (60.0 / (best_lag as f32 * frame_period)).round() as u32;
+        Ok(bpm.clamp(40, 220))
+    }
+
     /// Lê metadados de um arquivo de mídia com o ffmpeg (codec, duração, etc.).
     pub async fn probe_metadata(&self, file: &str) -> Result<String, Box<dyn std::error::Error>> {
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
@@ -284,7 +490,7 @@ impl DownloadEngine {
         on_progress: F,
     ) -> Result<PathBuf, Box<dyn std::error::Error>>
     where
-        F: Fn(f64) + Send + Sync + 'static,
+        F: Fn(Progress) + Send + Sync + 'static,
     {
         if !looks_like_url(url) {
             return Err("URL inválida. Cole um link válido (ex.: https://...)".into());
@@ -387,7 +593,7 @@ impl DownloadEngine {
         on_progress: F,
     ) -> Result<PathBuf, Box<dyn std::error::Error>>
     where
-        F: Fn(f64) + Send + Sync + 'static,
+        F: Fn(Progress) + Send + Sync + 'static,
     {
         use std::process::Stdio;
         use tokio::io::AsyncBufReadExt;
@@ -529,18 +735,52 @@ impl DownloadEngine {
                 buf
             });
 
+            // Zera o histórico de velocidade para este download.
+            {
+                let mut n = self.net.lock().unwrap();
+                n.current = 0.0;
+                n.history.clear();
+            }
             let mut lines = tokio::io::BufReader::new(stdout).lines();
+            let (mut last_frac, mut last_speed, mut last_eta) = (0.0f64, 0.0f64, 0u64);
             while let Ok(Some(line)) = lines.next_line().await {
+                let mut changed = false;
                 if let Some(p) = parse_ytdlp_percent(&line) {
-                    on_progress(p);
+                    last_frac = p;
+                    changed = true;
                 }
+                if let Some(spd) = parse_ytdlp_speed(&line) {
+                    last_speed = spd;
+                    changed = true;
+                    let mut n = self.net.lock().unwrap();
+                    n.current = spd as f32;
+                    n.history.push(spd as f32);
+                    if n.history.len() > 160 {
+                        n.history.remove(0);
+                    }
+                }
+                if let Some(eta) = parse_ytdlp_eta(&line) {
+                    last_eta = eta;
+                    changed = true;
+                }
+                if changed {
+                    on_progress(Progress {
+                        fraction: last_frac,
+                        speed_bps: last_speed,
+                        eta_secs: last_eta,
+                    });
+                }
+            }
+            // Fim do download: zera a velocidade atual.
+            {
+                self.net.lock().unwrap().current = 0.0;
             }
 
             let status = child.wait().await?;
             let stderr_text = stderr_task.await.unwrap_or_default();
 
             if status.success() {
-                on_progress(1.0);
+                on_progress(Progress { fraction: 1.0, speed_bps: 0.0, eta_secs: 0 });
                 let expected = folder.join(format!("{}.{}", stem, final_ext));
                 let result = if expected.exists() {
                     Some(expected)
@@ -801,6 +1041,68 @@ impl DownloadEngine {
             let stderr = String::from_utf8_lossy(&result.stderr);
             let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
             return Err(format!("ffmpeg falhou ao extrair frames: {}", last).into());
+        }
+        Ok(out_dir)
+    }
+
+    /// Converte várias imagens em lote (formato, largura máx. e qualidade) com o ffmpeg.
+    /// Retorna a pasta de saída. Continua mesmo se alguma imagem falhar.
+    pub async fn batch_convert_images(
+        &self,
+        inputs: Vec<PathBuf>,
+        out_dir: PathBuf,
+        format: String,
+        max_width: u32,
+        quality: u32,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(&out_dir)?;
+        let mut ok = 0usize;
+        let mut last_err = String::new();
+        for inp in &inputs {
+            let stem = inp
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "imagem".to_string());
+            let out = out_dir.join(format!("{}.{}", stem, format));
+
+            let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
+            cmd.arg("-y").arg("-i").arg(inp);
+            if max_width > 0 {
+                cmd.arg("-vf").arg(format!("scale='min({},iw)':-2", max_width));
+            }
+            match format.as_str() {
+                "jpg" | "jpeg" => {
+                    // -q:v 2 (melhor) .. 31 (pior); mapeia qualidade%.
+                    let qv = 2 + ((100u32.saturating_sub(quality.min(100))) * 29 / 100);
+                    cmd.arg("-q:v").arg(qv.to_string());
+                }
+                "webp" => {
+                    cmd.arg("-quality").arg(quality.min(100).to_string());
+                }
+                "png" => {
+                    cmd.arg("-compression_level").arg("9");
+                }
+                _ => {}
+            }
+            cmd.arg(&out);
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000);
+
+            let res = cmd.output().await?;
+            if res.status.success() && out.exists() {
+                ok += 1;
+            } else {
+                let stderr = String::from_utf8_lossy(&res.stderr);
+                last_err = stderr
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .to_string();
+            }
+        }
+        if ok == 0 {
+            return Err(format!("nenhuma imagem convertida: {}", last_err).into());
         }
         Ok(out_dir)
     }
@@ -1088,6 +1390,66 @@ impl DownloadEngine {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
             return Err(format!("ffmpeg falhou ao aplicar marca d'água: {}", last).into());
+        }
+        Ok(out)
+    }
+
+    /// Gera um QUADRO de pré-visualização de um vídeo já com a marca d'água aplicada
+    /// (extrai um frame representativo, aplica a marca e reduz para exibição).
+    pub async fn watermark_preview(
+        &self,
+        video: &str,
+        watermark: &str,
+        out: &Path,
+        position: &str,
+        scale_pct: u32,
+        opacity: f32,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let out = out.to_path_buf();
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let margin = 16;
+        let overlay_pos = match position {
+            "tl" => format!("{m}:{m}", m = margin),
+            "tr" => format!("W-w-{m}:{m}", m = margin),
+            "bl" => format!("{m}:H-h-{m}", m = margin),
+            "center" => "(W-w)/2:(H-h)/2".to_string(),
+            _ => format!("W-w-{m}:H-h-{m}", m = margin),
+        };
+        let scale = (scale_pct.clamp(5, 400) as f32) / 100.0;
+        let opacity = opacity.clamp(0.0, 1.0);
+        // Aplica a marca no tamanho real do frame (fiel) e só então reduz o composto.
+        let filter = format!(
+            "[0:v]thumbnail[b];\
+             [1:v]format=rgba,colorchannelmixer=aa={op},scale=iw*{sc}:-1[wm];\
+             [b][wm]overlay={pos},scale='min(640,iw)':-1[o]",
+            op = opacity,
+            sc = scale,
+            pos = overlay_pos
+        );
+
+        let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
+        cmd.arg("-y")
+            .arg("-i")
+            .arg(video)
+            .arg("-i")
+            .arg(watermark)
+            .arg("-filter_complex")
+            .arg(&filter)
+            .arg("-map")
+            .arg("[o]")
+            .arg("-frames:v")
+            .arg("1")
+            .arg(&out);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+
+        let output = cmd.output().await?;
+        if !output.status.success() || !out.exists() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+            return Err(format!("falha ao gerar pré-visualização: {}", last).into());
         }
         Ok(out)
     }
@@ -1501,17 +1863,26 @@ impl DownloadEngine {
             s.lines().next().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
         }
 
+        // Existe o arquivo mas a versão falha = binário corrompido.
+        let missing_or_corrupt = |path: &Path| -> String {
+            if path.exists() {
+                "⚠ corrompido".to_string()
+            } else {
+                "não instalado".to_string()
+            }
+        };
+
         let mut rows = Vec::new();
         let yt = version(&self.ytdlp_path(), &["--version"])
             .await
-            .unwrap_or_else(|| "não instalado".to_string());
+            .unwrap_or_else(|| missing_or_corrupt(&self.ytdlp_path()));
         rows.push(("yt-dlp".to_string(), yt));
 
         let ff = version(&self.ffmpeg_path, &["-version"])
             .await
             .map(|l| l.replace("ffmpeg version ", "").split(' ').next().unwrap_or("").to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "não instalado".to_string());
+            .unwrap_or_else(|| missing_or_corrupt(&self.ffmpeg_path));
         rows.push(("ffmpeg".to_string(), ff));
 
         let pdfium = {
@@ -2006,6 +2377,54 @@ fn parse_ytdlp_percent(line: &str) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .map(|v| (v / 100.0).clamp(0.0, 1.0))
+}
+
+/// Extrai a velocidade (bytes/s) de uma linha de progresso do yt-dlp.
+/// Ex.: "[download]  12.3% of 10.00MiB at  1.23MiB/s ETA 00:07" → 1289748.0
+fn parse_ytdlp_speed(line: &str) -> Option<f64> {
+    let l = line.trim_start();
+    if !l.starts_with("[download]") {
+        return None;
+    }
+    // Procura o token que termina em "/s" (ex.: "1.23MiB/s").
+    let tok = l.split_whitespace().find(|t| t.ends_with("/s"))?;
+    let body = tok.trim_end_matches("/s");
+    // Separa número do sufixo de unidade.
+    let split = body.find(|c: char| c.is_alphabetic()).unwrap_or(body.len());
+    let (num, unit) = body.split_at(split);
+    let value: f64 = num.parse().ok()?;
+    let mult = match unit {
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        "MiB" => 1024.0 * 1024.0,
+        "KiB" => 1024.0,
+        "GB" => 1_000_000_000.0,
+        "MB" => 1_000_000.0,
+        "KB" | "kB" => 1000.0,
+        "B" | "" => 1.0,
+        _ => return None,
+    };
+    Some(value * mult)
+}
+
+/// Extrai o ETA (segundos) de uma linha de progresso do yt-dlp ("ETA 00:07").
+fn parse_ytdlp_eta(line: &str) -> Option<u64> {
+    let l = line.trim_start();
+    if !l.starts_with("[download]") {
+        return None;
+    }
+    let mut it = l.split_whitespace();
+    let tok = loop {
+        match it.next() {
+            Some("ETA") => break it.next()?,
+            Some(_) => continue,
+            None => return None,
+        }
+    };
+    let mut secs = 0u64;
+    for p in tok.split(':') {
+        secs = secs * 60 + p.parse::<u64>().ok()?;
+    }
+    Some(secs)
 }
 
 /// Heurística simples: a URL é do YouTube?

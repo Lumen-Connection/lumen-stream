@@ -24,6 +24,7 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let mut do_clear = false;
     let mut do_archive = false;
     let mut do_reinstall = false;
+    let mut do_orphans = false;
 
     // Layout em 2 colunas (1 em janelas estreitas) para preencher a tela.
     let ncols = if ui.available_width() > 980.0 { 2 } else { 1 };
@@ -104,6 +105,20 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             app.config.compact_ui = compact;
             theme::set_compact(compact);
             theme::apply(ui.ctx());
+            changed = true;
+        }
+        ui.add_space(6.0);
+        if ui
+            .checkbox(
+                &mut app.config.confirm_delete,
+                if pt {
+                    "Confirmar antes de limpar o histórico"
+                } else {
+                    "Confirm before clearing history"
+                },
+            )
+            .changed()
+        {
             changed = true;
         }
         ui.add_space(6.0);
@@ -265,6 +280,82 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     ui.add_space(16.0);
 
+    // --- Perfis de download ---
+    theme::card_frame().show(ui, |ui| {
+        ui.label(
+            egui::RichText::new(if pt { "Perfis de download" } else { "Download profiles" })
+                .color(theme::text_muted())
+                .size(11.0)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new(if pt {
+                "Presets de formato/qualidade aplicáveis no modal de download."
+            } else {
+                "Format/quality presets you can apply in the download dialog."
+            })
+            .color(theme::text_faint())
+            .size(11.0),
+        );
+        ui.add_space(8.0);
+        let mut remove: Option<usize> = None;
+        for (i, p) in app.config.profiles.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  ·  {}  ·  {}/{}",
+                        p.name, p.media_type, p.format, p.quality
+                    ))
+                    .color(theme::text())
+                    .size(12.0),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(theme::ghost_button("✕")).clicked() {
+                        remove = Some(i);
+                    }
+                });
+            });
+        }
+        if let Some(i) = remove {
+            app.config.profiles.remove(i);
+            changed = true;
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut app.profile_draft.name)
+                    .hint_text(if pt { "Nome" } else { "Name" })
+                    .desired_width(100.0),
+            );
+            for (val, lbl) in [("music", "🎵"), ("video", "🎬")] {
+                let sel = app.profile_draft.media_type == val;
+                let fill = if sel { theme::accent() } else { theme::bg_card() };
+                if ui.add(egui::Button::new(lbl).fill(fill)).clicked() {
+                    app.profile_draft.media_type = val.to_string();
+                }
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut app.profile_draft.format)
+                    .hint_text("mp4")
+                    .desired_width(56.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut app.profile_draft.quality)
+                    .hint_text("best")
+                    .desired_width(64.0),
+            );
+            if ui.add(theme::accent_button("＋")).clicked()
+                && !app.profile_draft.name.trim().is_empty()
+            {
+                app.config.profiles.push(app.profile_draft.clone());
+                app.profile_draft.name.clear();
+                changed = true;
+            }
+        });
+    });
+
+    ui.add_space(16.0);
+
         let ui = &mut cols[right_idx];
 
     // --- Organização & nuvem ---
@@ -414,7 +505,31 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             {
                 do_reinstall = true;
             }
+            if ui
+                .add(theme::ghost_button(if pt {
+                    "🔍 Procurar arquivos órfãos"
+                } else {
+                    "🔍 Find orphan files"
+                }))
+                .clicked()
+            {
+                do_orphans = true;
+            }
         });
+        ui.add_space(8.0);
+        if ui
+            .checkbox(
+                &mut app.config.auto_retry,
+                if pt {
+                    "Re-tentar downloads automaticamente em falha de rede"
+                } else {
+                    "Auto-retry downloads on network failure"
+                },
+            )
+            .changed()
+        {
+            changed = true;
+        }
     });
     }); // fim de ui.columns
 
@@ -450,6 +565,9 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             },
             false,
         );
+    }
+    if do_orphans {
+        app.find_orphans();
     }
 
     ui.add_space(16.0);

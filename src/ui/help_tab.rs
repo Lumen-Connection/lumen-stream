@@ -85,7 +85,10 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         );
         ui.add_space(6.0);
         let shortcuts: &[(&str, &str)] = &[
-            ("Ctrl + 1..6", if pt { "Trocar de aba" } else { "Switch tabs" }),
+            ("Ctrl + 1..7", if pt { "Ir para uma aba" } else { "Go to a tab" }),
+            ("Ctrl + Tab", if pt { "Próxima aba / anterior (+Shift)" } else { "Next tab / previous (+Shift)" }),
+            ("Ctrl + K", if pt { "Paleta de comandos" } else { "Command palette" }),
+            ("Tab", if pt { "Navegar entre campos" } else { "Move between fields" }),
             ("Enter", if pt { "Baixar (campo de URL)" } else { "Download (URL field)" }),
             ("Esc", if pt { "Cancelar / fechar diálogo" } else { "Cancel / close dialog" }),
         ];

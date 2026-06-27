@@ -6,6 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::settings::Config;
 use crate::db::database::Database;
+
+/// Estado do editor de tags ID3.
+pub struct TagEditState {
+    pub path: String,
+    pub t: crate::download::engine::AudioTags,
+    pub detecting: bool,
+}
 use crate::download::engine::{DownloadEngine, VideoPreview};
 use crate::queue::Queue;
 use crate::ui::dashboard;
@@ -55,6 +62,36 @@ pub struct App {
     pub qr_window: Option<(String, egui::TextureHandle)>,
     /// Diálogo de reordenação de PDF: (arquivo, ordem digitada).
     pub pdf_reorder: Option<(PathBuf, String)>,
+    /// Editor de tags ID3 (janela).
+    pub tag_editor: Option<TagEditState>,
+    bpm_result: Arc<Mutex<Option<u32>>>,
+    /// Filtro "só favoritos" no histórico e diálogo de tags/categorias (id, texto).
+    pub history_fav_only: bool,
+    pub history_tag_edit: Option<(i64, String)>,
+    /// Modo de edição dos cards de atalho da Home.
+    pub home_edit: bool,
+    /// Itens do histórico selecionados (ações em massa).
+    pub selected: std::collections::HashSet<i64>,
+    /// Lista de arquivos órfãos encontrados (janela).
+    pub orphans: Option<Vec<PathBuf>>,
+    /// Rascunho do novo perfil de download (na tela de Configurações).
+    pub profile_draft: crate::config::settings::DownloadProfile,
+    /// Tela cheia (modo quiosque).
+    pub fullscreen: bool,
+    /// Último download (url, tipo) para "repetir".
+    pub last_download: Option<(String, MediaType)>,
+    /// Confirmação pendente de "limpar histórico" (media_type).
+    pub pending_clear: Option<String>,
+    /// Assinatura da fila para detectar mudanças e persistir.
+    queue_sig: u64,
+    /// Abas destacadas em janelas próprias (multi-janela).
+    pub detached: Vec<Tab>,
+    /// Pré-visualização da marca d'água: vídeo de amostra, textura e controle.
+    pub wm_preview_video: Option<PathBuf>,
+    pub wm_preview_tex: Option<egui::TextureHandle>,
+    pub wm_preview_sig: String,
+    pub wm_preview_busy: bool,
+    wm_preview_ready: Arc<Mutex<Option<PathBuf>>>,
     /// Status/versões das dependências (yt-dlp, ffmpeg, pdfium, whisper).
     pub deps_status: Arc<Mutex<Vec<(String, String)>>>,
     pub deps_requested: bool,
@@ -81,6 +118,8 @@ pub struct Toast {
     pub text: String,
     pub error: bool,
     pub created: std::time::Instant,
+    /// Se presente, mostra um botão "Desfazer" que restaura este item do histórico.
+    pub undo: Option<i64>,
 }
 
 /// Estado do inspetor de formatos.
@@ -93,7 +132,7 @@ pub struct InspectorState {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Tab {
     Home,
     Music,
@@ -107,6 +146,41 @@ pub enum Tab {
     Achievements,
     Settings,
     Help,
+}
+
+impl Tab {
+    pub fn id(&self) -> &'static str {
+        match self {
+            Tab::Home => "home",
+            Tab::Music => "music",
+            Tab::Video => "video",
+            Tab::Converter => "converter",
+            Tab::Queue => "queue",
+            Tab::Folders => "folders",
+            Tab::Gallery => "gallery",
+            Tab::Cloud => "cloud",
+            Tab::Stats => "stats",
+            Tab::Achievements => "achievements",
+            Tab::Settings => "settings",
+            Tab::Help => "help",
+        }
+    }
+    pub fn from_id(s: &str) -> Tab {
+        match s {
+            "music" => Tab::Music,
+            "video" => Tab::Video,
+            "converter" => Tab::Converter,
+            "queue" => Tab::Queue,
+            "folders" => Tab::Folders,
+            "gallery" => Tab::Gallery,
+            "cloud" => Tab::Cloud,
+            "stats" => Tab::Stats,
+            "achievements" => Tab::Achievements,
+            "settings" => Tab::Settings,
+            "help" => Tab::Help,
+            _ => Tab::Home,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -155,7 +229,7 @@ pub enum DownloadPhase {
     Failed(String),
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MediaType {
     Music,
     Video,
@@ -196,8 +270,12 @@ impl App {
         let batch_format = config.video_format.clone();
         let batch_quality = config.quality.clone();
 
+        // Retoma a fila salva da sessão anterior.
+        let mut queue = Queue::new();
+        queue.load(&Self::queue_path());
+
         App {
-            active_tab: Tab::Home,
+            active_tab: Tab::from_id(&config.last_tab),
             music_url: String::new(),
             video_url: String::new(),
             operation,
@@ -206,7 +284,7 @@ impl App {
             engine: None,
             download_task: None,
             update_status: Arc::new(Mutex::new(UpdateStatus::Idle)),
-            queue: Queue::new(),
+            queue,
             batch_input: String::new(),
             batch_media_type: MediaType::Video,
             batch_format,
@@ -228,6 +306,29 @@ impl App {
             info_window: Arc::new(Mutex::new(None)),
             qr_window: None,
             pdf_reorder: None,
+            tag_editor: None,
+            bpm_result: Arc::new(Mutex::new(None)),
+            history_fav_only: false,
+            history_tag_edit: None,
+            home_edit: false,
+            selected: std::collections::HashSet::new(),
+            orphans: None,
+            profile_draft: crate::config::settings::DownloadProfile {
+                name: String::new(),
+                media_type: "video".to_string(),
+                format: "mp4".to_string(),
+                quality: "best".to_string(),
+            },
+            fullscreen: false,
+            last_download: None,
+            pending_clear: None,
+            queue_sig: 0,
+            detached: Vec::new(),
+            wm_preview_video: None,
+            wm_preview_tex: None,
+            wm_preview_sig: String::new(),
+            wm_preview_busy: false,
+            wm_preview_ready: Arc::new(Mutex::new(None)),
             deps_status: Arc::new(Mutex::new(Vec::new())),
             deps_requested: false,
             cmd_palette_open: false,
@@ -315,10 +416,20 @@ impl App {
 
     /// Adiciona um toast (notificação in-app).
     pub fn toast(&mut self, text: impl Into<String>, error: bool) {
+        self.push_toast(text.into(), error, None);
+    }
+
+    /// Toast com botão "Desfazer" que restaura um item do histórico.
+    pub fn toast_undo(&mut self, text: impl Into<String>, history_id: i64) {
+        self.push_toast(text.into(), false, Some(history_id));
+    }
+
+    fn push_toast(&mut self, text: String, error: bool, undo: Option<i64>) {
         self.toasts.push(Toast {
-            text: text.into(),
+            text,
             error,
             created: std::time::Instant::now(),
+            undo,
         });
         if self.toasts.len() > 4 {
             self.toasts.remove(0);
@@ -372,6 +483,13 @@ impl App {
         });
     }
 
+    fn queue_path() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("LumenDownloader")
+            .join("queue.json")
+    }
+
     fn thumb_dir() -> PathBuf {
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -398,6 +516,128 @@ impl App {
         }
         if more {
             ctx.request_repaint();
+        }
+    }
+
+    /// (Re)gera a pré-visualização da marca d'água se os parâmetros mudaram.
+    /// `sig` identifica vídeo+marca+posição+tamanho+opacidade.
+    pub fn request_wm_preview(&mut self, sig: String) {
+        if self.wm_preview_busy || sig == self.wm_preview_sig {
+            return;
+        }
+        let (Some(video), wm) = (
+            self.wm_preview_video.clone(),
+            self.config.watermark_path.clone(),
+        ) else {
+            return;
+        };
+        if wm.trim().is_empty() {
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            return;
+        };
+        self.wm_preview_sig = sig;
+        self.wm_preview_busy = true;
+        let out = Self::thumb_dir().join("wm_preview.jpg");
+        let pos = self.config.watermark_pos.clone();
+        let scale = self.config.watermark_scale;
+        let opacity = self.config.watermark_opacity;
+        let slot = self.wm_preview_ready.clone();
+        tokio::spawn(async move {
+            let r = engine
+                .watermark_preview(&video.to_string_lossy(), &wm, &out, &pos, scale, opacity)
+                .await;
+            *slot.lock().unwrap() = r.ok();
+        });
+    }
+
+    /// Carrega a pré-visualização da marca d'água gerada em background.
+    fn load_wm_preview(&mut self, ctx: &egui::Context) {
+        let ready = self.wm_preview_ready.lock().unwrap().take();
+        if let Some(jpg) = ready {
+            self.wm_preview_tex = load_texture_from_file(ctx, &jpg);
+            self.wm_preview_busy = false;
+            ctx.request_repaint();
+        }
+    }
+
+    /// Abre o editor de tags ID3 para um arquivo de áudio.
+    pub fn open_tag_editor(&mut self, path: String) {
+        let t = crate::download::engine::read_audio_tags(&path);
+        self.tag_editor = Some(TagEditState {
+            path,
+            t,
+            detecting: false,
+        });
+    }
+
+    /// Grava as tags editadas no arquivo.
+    pub fn save_tags(&mut self) {
+        if let Some(ed) = &self.tag_editor {
+            match crate::download::engine::write_audio_tags(&ed.path, &ed.t) {
+                Ok(_) => self.toast("🏷 Tags salvas", false),
+                Err(e) => self.toast(&format!("Falha ao salvar tags: {}", e), true),
+            }
+        }
+        self.tag_editor = None;
+    }
+
+    /// Detecta o BPM do arquivo em edição (em background).
+    pub fn detect_bpm_editor(&mut self) {
+        let Some(ed) = self.tag_editor.as_mut() else {
+            return;
+        };
+        let path = ed.path.clone();
+        let Some(eng) = self.engine.clone() else {
+            return;
+        };
+        ed.detecting = true;
+        let slot = self.bpm_result.clone();
+        tokio::spawn(async move {
+            let r = eng.detect_bpm(&path).await.unwrap_or(0);
+            *slot.lock().unwrap() = Some(r);
+        });
+    }
+
+    fn load_bpm_result(&mut self) {
+        let r = self.bpm_result.lock().unwrap().take();
+        if let Some(bpm) = r {
+            if let Some(ed) = self.tag_editor.as_mut() {
+                ed.detecting = false;
+                if bpm > 0 {
+                    ed.t.bpm = bpm.to_string();
+                }
+            }
+            if bpm == 0 {
+                self.toast("Não foi possível detectar o BPM.", true);
+            }
+        }
+    }
+
+    /// Exporta uma playlist .m3u8 com os itens informados (título, caminho).
+    pub fn export_playlist(&mut self, entries: Vec<(String, String)>) {
+        if entries.is_empty() {
+            self.toast("Nada para exportar.", true);
+            return;
+        }
+        let Some(mut out) = rfd::FileDialog::new()
+            .add_filter("Playlist", &["m3u8", "m3u"])
+            .set_file_name("playlist.m3u8")
+            .save_file()
+        else {
+            return;
+        };
+        if out.extension().is_none() {
+            out.set_extension("m3u8");
+        }
+        let mut s = String::from("#EXTM3U\n");
+        for (title, path) in &entries {
+            s.push_str(&format!("#EXTINF:-1,{}\n{}\n", title, path));
+        }
+        match std::fs::write(&out, s) {
+            Ok(_) => self.toast("Playlist exportada.", false),
+            Err(e) => self.toast(&format!("Falha ao exportar: {}", e), true),
         }
     }
 
@@ -579,6 +819,9 @@ impl App {
             MediaType::Convert => return, // conversão não usa este fluxo
         };
 
+        // Guarda para "repetir último download".
+        self.last_download = Some((url.clone(), media_type));
+
         {
             let mut op = self.operation.lock().unwrap();
             op.phase = DownloadPhase::Fetching;
@@ -598,7 +841,11 @@ impl App {
         let smart = self.config.smart_rename;
         self.download_task = Some(tokio::spawn(async move {
             match engine {
-                Some(ref eng) => match eng.fetch_preview(&url).await {
+                Some(ref eng) => {
+                    // Resolve fontes especiais (ex.: Spotify → busca no YouTube).
+                    let url = eng.resolve_source(&url).await;
+                    op_ref.lock().unwrap().url = url.clone();
+                    match eng.fetch_preview(&url).await {
                     Ok(preview) => {
                         let mut op = op_ref.lock().unwrap();
                         op.title = preview.title.clone();
@@ -623,13 +870,65 @@ impl App {
                             crate::download::engine::friendly_error(&e.to_string()),
                         );
                     }
-                },
+                    }
+                }
                 None => {
                     let mut op = op_ref.lock().unwrap();
                     op.phase = DownloadPhase::Failed("Engine não inicializado".to_string());
                 }
             }
         }));
+    }
+
+    /// Procura arquivos de mídia na pasta de download que não estão no histórico.
+    pub fn find_orphans(&mut self) {
+        let known: std::collections::HashSet<String> = self
+            .db
+            .all_active_history()
+            .iter()
+            .chain(self.db.get_deleted_history("music", 9999).iter())
+            .map(|e| e.file_path.to_lowercase())
+            .collect();
+        let exts = [
+            "mp4", "mkv", "webm", "avi", "mov", "mp3", "m4a", "flac", "opus", "ogg", "wav",
+            "aac", "jpg", "jpeg", "png", "webp", "gif", "pdf", "txt",
+        ];
+        let mut found = Vec::new();
+        let dir = self.config.default_download_dir.clone();
+        let mut stack = vec![dir];
+        let mut depth = 0;
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    if depth < 2 {
+                        stack.push(p);
+                    }
+                } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                    if exts.contains(&ext.to_lowercase().as_str())
+                        && !known.contains(&p.to_string_lossy().to_lowercase())
+                    {
+                        found.push(p);
+                    }
+                }
+            }
+            depth += 1;
+        }
+        found.sort();
+        found.truncate(500);
+        self.orphans = Some(found);
+    }
+
+    /// Repete o último download (mesmo link e tipo).
+    pub fn repeat_last_download(&mut self) {
+        if let Some((url, mt)) = self.last_download.clone() {
+            self.start_url_download(url, mt);
+        } else {
+            self.toast("Nenhum download recente para repetir.", true);
+        }
     }
 
     /// Abre o inspetor de formatos para um link (lista resoluções/codecs/tamanhos).
@@ -957,9 +1256,25 @@ impl App {
                 self.config.concurrent_fragments,
                 self.config.organize_by.clone(),
                 cloud,
+                self.config.auto_retry,
             );
         }
+        // Persiste a fila quando muda (para retomar na próxima sessão).
+        let sig = self.queue.signature();
+        if sig != self.queue_sig {
+            self.queue_sig = sig;
+            self.queue.save(&Self::queue_path());
+        }
+
+        // Lembra a última aba aberta.
+        if self.active_tab.id() != self.config.last_tab {
+            self.config.last_tab = self.active_tab.id().to_string();
+            self.config.save();
+        }
+
         self.load_ready_thumbs(ctx);
+        self.load_wm_preview(ctx);
+        self.load_bpm_result();
         self.update_toasts();
         if self.queue.has_active()
             || *self.update_status.lock().unwrap() == UpdateStatus::Running
@@ -1030,6 +1345,42 @@ impl App {
                 self.cmd_palette_open = false;
             }
             return;
+        }
+
+        // F11: alterna o modo quiosque (tela cheia).
+        if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
+            self.fullscreen = !self.fullscreen;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+        }
+
+        // Ctrl+Tab / Ctrl+Shift+Tab: cicla entre as abas (navegação por teclado).
+        let (cycle_next, cycle_prev) = ctx.input(|i| {
+            let t = i.modifiers.command && i.key_pressed(egui::Key::Tab);
+            (t && !i.modifiers.shift, t && i.modifiers.shift)
+        });
+        if cycle_next || cycle_prev {
+            const ORDER: [Tab; 12] = [
+                Tab::Home,
+                Tab::Music,
+                Tab::Video,
+                Tab::Converter,
+                Tab::Queue,
+                Tab::Folders,
+                Tab::Gallery,
+                Tab::Cloud,
+                Tab::Stats,
+                Tab::Achievements,
+                Tab::Settings,
+                Tab::Help,
+            ];
+            let cur = ORDER.iter().position(|t| *t == self.active_tab).unwrap_or(0);
+            let n = ORDER.len();
+            let next = if cycle_next {
+                (cur + 1) % n
+            } else {
+                (cur + n - 1) % n
+            };
+            self.active_tab = ORDER[next];
         }
 
         ctx.input(|i| {

@@ -170,6 +170,8 @@ pub struct Strings {
     pub transcribe: &'static str,
     pub transcribe_hint: &'static str,
     pub thumbnail_only: &'static str,
+    pub paste_download: &'static str,
+    pub repeat_last: &'static str,
     pub inspect_formats: &'static str,
     pub hist_export: &'static str,
     pub folders_title: &'static str,
@@ -217,7 +219,7 @@ static PT: Strings = Strings {
     clip_detected: "🔗 Link copiado detectado",
 
     video_title: "Baixar Vídeo",
-    video_subtitle: "Cole um link do YouTube, Twitter/X, Vimeo, Dailymotion e muito mais.",
+    video_subtitle: "Cole um link do YouTube, Twitter/X, Instagram (Reels), Vimeo e muito mais.",
     video_link: "LINK DO VÍDEO",
 
     queue_title: "Fila de Downloads",
@@ -341,6 +343,8 @@ static PT: Strings = Strings {
     transcribe: "📝  Transcrever",
     transcribe_hint: "Gera a transcrição (.txt) do áudio do link.",
     thumbnail_only: "🖼  Miniatura",
+    paste_download: "📋  Colar e baixar",
+    repeat_last: "⟳  Repetir último",
     inspect_formats: "🔎  Inspecionar formatos",
     hist_export: "Exportar todos para um .zip",
     folders_title: "Pastas",
@@ -381,7 +385,7 @@ static EN: Strings = Strings {
     clip_detected: "🔗 Copied link detected",
 
     video_title: "Download Video",
-    video_subtitle: "Paste a link from YouTube, Twitter/X, Vimeo, Dailymotion and more.",
+    video_subtitle: "Paste a link from YouTube, Twitter/X, Instagram (Reels), Vimeo and more.",
     video_link: "VIDEO LINK",
 
     queue_title: "Download Queue",
@@ -505,6 +509,8 @@ static EN: Strings = Strings {
     transcribe: "📝  Transcribe",
     transcribe_hint: "Generates a transcript (.txt) from the link's audio.",
     thumbnail_only: "🖼  Thumbnail",
+    paste_download: "📋  Paste & download",
+    repeat_last: "⟳  Repeat last",
     inspect_formats: "🔎  Inspect formats",
     hist_export: "Export all to a .zip",
     folders_title: "Folders",

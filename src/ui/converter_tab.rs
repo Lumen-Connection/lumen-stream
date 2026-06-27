@@ -82,6 +82,9 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     ui.add_space(16.0);
     pdf_card(app, ui);
 
+    ui.add_space(16.0);
+    image_batch_card(app, ui);
+
     // Painel de conversão em lote.
     if !app.batch_convert.is_empty() {
         ui.add_space(12.0);
@@ -558,14 +561,88 @@ fn watermark_card(app: &mut App, ui: &mut egui::Ui) {
         });
         ui.add_space(8.0);
 
-        let has_wm = !app.config.watermark_path.trim().is_empty();
+        // --- Pré-visualização: um quadro do vídeo já com a marca aplicada ---
+        ui.separator();
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
+            if ui
+                .add(theme::accent_button(if pt { "🎬 Selecionar vídeo..." } else { "🎬 Select video..." }))
+                .clicked()
+            {
+                if let Some(v) = rfd::FileDialog::new()
+                    .add_filter("Vídeo", &["mp4", "mkv", "webm", "avi", "mov"])
+                    .pick_file()
+                {
+                    app.wm_preview_video = Some(v);
+                    app.wm_preview_sig.clear();
+                    app.wm_preview_tex = None;
+                }
+            }
+            if let Some(v) = &app.wm_preview_video {
+                let name = v
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                ui.label(egui::RichText::new(name).color(theme::text_faint()).size(11.0));
+            }
+        });
+
+        if app.wm_preview_video.is_some() && !app.config.watermark_path.trim().is_empty() {
+            let sig = format!(
+                "{}|{}|{}|{}|{}",
+                app.wm_preview_video.as_ref().unwrap().to_string_lossy(),
+                app.config.watermark_path,
+                app.config.watermark_pos,
+                app.config.watermark_scale,
+                app.config.watermark_opacity,
+            );
+            // Regenera só quando o usuário não está arrastando (evita spam de ffmpeg).
+            if !ui.input(|i| i.pointer.any_down()) {
+                app.request_wm_preview(sig);
+            }
+            ui.add_space(6.0);
+            if let Some(tex) = &app.wm_preview_tex {
+                let [w, h] = tex.size();
+                let tw = (ui.available_width() - 2.0).min(w as f32);
+                let th = tw * h as f32 / w.max(1) as f32;
+                ui.add(egui::Image::from_texture((tex.id(), egui::vec2(tw, th))));
+            }
+            if app.wm_preview_busy {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.label(
+                        egui::RichText::new(if pt { "Atualizando prévia..." } else { "Updating preview..." })
+                            .color(theme::text_muted())
+                            .size(11.0),
+                    );
+                });
+            }
+        } else {
+            ui.label(
+                egui::RichText::new(if pt {
+                    "Selecione um vídeo para ver a marca aplicada e confirmar."
+                } else {
+                    "Select a video to preview the mark applied and confirm."
+                })
+                .color(theme::text_faint())
+                .size(11.0),
+            );
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        let has_wm = !app.config.watermark_path.trim().is_empty();
+        let has_video = app.wm_preview_video.is_some();
+        ui.horizontal(|ui| {
+            // Confirma: aplica e salva no MESMO vídeo selecionado/pré-visualizado.
             let btn = theme::accent_button(if pt {
-                "Aplicar em um vídeo..."
+                "✅ Aplicar e salvar"
             } else {
-                "Apply to a video..."
-            });
-            if ui.add_enabled(has_wm, btn).clicked() {
+                "✅ Apply & save"
+            })
+            .min_size(egui::vec2(160.0, 36.0));
+            if ui.add_enabled(has_wm && has_video, btn).clicked() {
                 apply = true;
             }
             let bbtn = theme::ghost_button(if pt {
@@ -577,6 +654,17 @@ fn watermark_card(app: &mut App, ui: &mut egui::Ui) {
                 apply_batch = true;
             }
         });
+        if has_wm && !has_video {
+            ui.label(
+                egui::RichText::new(if pt {
+                    "Selecione um vídeo acima para habilitar."
+                } else {
+                    "Select a video above to enable."
+                })
+                .color(theme::text_faint())
+                .size(11.0),
+            );
+        }
         if !has_wm {
             ui.label(
                 egui::RichText::new(if pt {
@@ -704,10 +792,8 @@ fn watermark_batch_flow(app: &mut App) {
 }
 
 fn watermark_flow(app: &mut App) {
-    let Some(video) = rfd::FileDialog::new()
-        .add_filter("Vídeo", &["mp4", "mkv", "webm", "avi", "mov"])
-        .pick_file()
-    else {
+    // Usa o vídeo já selecionado/pré-visualizado.
+    let Some(video) = app.wm_preview_video.clone() else {
         return;
     };
     let stem = video
@@ -771,6 +857,115 @@ fn watermark_flow(app: &mut App) {
 }
 
 /// Cartão de ferramentas de PDF: juntar, separar e rotacionar.
+/// Cartão de conversão de imagens em lote (formato + redimensionar + comprimir).
+fn image_batch_card(app: &mut App, ui: &mut egui::Ui) {
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
+    let mut run = false;
+    theme::card_frame().show(ui, |ui| {
+        ui.label(
+            egui::RichText::new(if pt { "🖼 Imagens em lote" } else { "🖼 Batch images" })
+                .color(theme::text())
+                .size(16.0)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new(if pt {
+                "Converte/redimensiona/comprime várias imagens de uma vez (inclui HEIC)."
+            } else {
+                "Convert/resize/compress many images at once (HEIC included)."
+            })
+            .color(theme::text_muted())
+            .size(12.0),
+        );
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(if pt { "Formato" } else { "Format" });
+            for f in ["jpg", "png", "webp"] {
+                let sel = app.config.image_format == f;
+                let fill = if sel { theme::accent() } else { theme::bg_card() };
+                if ui.add(egui::Button::new(f).fill(fill)).clicked() {
+                    app.config.image_format = f.to_string();
+                }
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(if pt { "Largura máx (0 = original)" } else { "Max width (0 = original)" });
+            ui.add(egui::Slider::new(&mut app.config.image_max_width, 0..=3840));
+        });
+        ui.horizontal(|ui| {
+            ui.label(if pt { "Qualidade" } else { "Quality" });
+            ui.add(egui::Slider::new(&mut app.config.image_quality, 10..=100));
+        });
+        ui.add_space(8.0);
+        if ui
+            .add(theme::accent_button(if pt {
+                "Selecionar imagens e converter..."
+            } else {
+                "Select images & convert..."
+            }))
+            .clicked()
+        {
+            run = true;
+        }
+    });
+    if run {
+        image_batch_flow(app);
+    }
+}
+
+fn image_batch_flow(app: &mut App) {
+    let Some(files) = rfd::FileDialog::new()
+        .add_filter(
+            "Imagens",
+            &["jpg", "jpeg", "png", "webp", "bmp", "tiff", "gif", "heic", "heif"],
+        )
+        .pick_files()
+    else {
+        return;
+    };
+    if files.is_empty() {
+        return;
+    }
+    app.config.save();
+    let out_dir = files
+        .first()
+        .and_then(|f| f.parent())
+        .map(|p| p.join("imagens_convertidas"))
+        .unwrap_or_else(|| std::path::PathBuf::from("imagens_convertidas"));
+    let engine = app.engine.clone();
+    let op_state = app.operation.clone();
+    let format = app.config.image_format.clone();
+    let maxw = app.config.image_max_width;
+    let quality = app.config.image_quality;
+    let n = files.len();
+
+    {
+        let mut op = op_state.lock().unwrap();
+        op.phase = DownloadPhase::Downloading(format!("Convertendo {} imagem(ns)...", n));
+        op.progress = None;
+    }
+    app.download_task = Some(tokio::spawn(async move {
+        let Some(eng) = engine else {
+            op_state.lock().unwrap().phase =
+                DownloadPhase::Failed("Engine não inicializado".to_string());
+            return;
+        };
+        match eng
+            .batch_convert_images(files, out_dir.clone(), format, maxw, quality)
+            .await
+        {
+            Ok(p) => {
+                op_state.lock().unwrap().phase =
+                    DownloadPhase::Completed(p.to_string_lossy().to_string());
+            }
+            Err(e) => {
+                op_state.lock().unwrap().phase = DownloadPhase::Failed(e.to_string());
+            }
+        }
+    }));
+}
+
 fn pdf_card(app: &mut App, ui: &mut egui::Ui) {
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
     let mut merge = false;

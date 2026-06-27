@@ -29,3 +29,4 @@ flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 qrcode = { version = "0.14", default-features = false }
+lofty = "0.23"

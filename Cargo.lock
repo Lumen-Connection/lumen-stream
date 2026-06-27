@@ -3033,6 +3033,7 @@ dependencies = [
  "flate2",
  "fs2",
  "image 0.25.10",
+ "lofty",
  "notify-rust",
  "open",
  "pdfium-render",

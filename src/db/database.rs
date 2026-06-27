@@ -17,6 +17,8 @@ pub struct HistoryEntry {
     pub folder_path: String,
     pub file_size: Option<i64>,
     pub created_at: String,
+    pub favorite: bool,
+    pub tags: String,
 }
 
 #[derive(Clone, Debug)]
@@ -65,12 +67,19 @@ impl Database {
             ",
         )
         .expect("Failed to initialize database schema");
-        // Migração: coluna `deleted` para a lixeira (ignora erro se já existir).
+        // Migrações (ignoram erro se a coluna já existir).
         conn.execute(
             "ALTER TABLE history ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
             [],
         )
         .ok();
+        conn.execute(
+            "ALTER TABLE history ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .ok();
+        conn.execute("ALTER TABLE history ADD COLUMN tags TEXT NOT NULL DEFAULT ''", [])
+            .ok();
         Database { conn }
     }
 
@@ -108,7 +117,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, url, title, media_type, format, quality, file_path, folder_path, file_size, created_at
+                "SELECT id, url, title, media_type, format, quality, file_path, folder_path, file_size, created_at, favorite, tags
                  FROM history WHERE media_type = ?1 AND deleted = ?3 ORDER BY created_at DESC LIMIT ?2",
             )
             .unwrap();
@@ -124,11 +133,30 @@ impl Database {
                 folder_path: row.get(7)?,
                 file_size: row.get(8)?,
                 created_at: row.get(9)?,
+                favorite: row.get::<_, i64>(10)? != 0,
+                tags: row.get(11)?,
             })
         })
         .unwrap()
         .filter_map(|r| r.ok())
         .collect()
+    }
+
+    /// Alterna o estado de favorito de um item.
+    pub fn toggle_favorite(&self, id: i64) {
+        self.conn
+            .execute(
+                "UPDATE history SET favorite = 1 - favorite WHERE id = ?1",
+                params![id],
+            )
+            .ok();
+    }
+
+    /// Define as tags/categorias (texto livre separado por vírgula) de um item.
+    pub fn set_tags(&self, id: i64, tags: &str) {
+        self.conn
+            .execute("UPDATE history SET tags = ?1 WHERE id = ?2", params![tags, id])
+            .ok();
     }
 
     /// Move um item para a lixeira (soft delete).
@@ -216,7 +244,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, url, title, media_type, format, quality, file_path, folder_path, file_size, created_at
+                "SELECT id, url, title, media_type, format, quality, file_path, folder_path, file_size, created_at, favorite, tags
                  FROM history WHERE deleted = 0 ORDER BY created_at DESC",
             )
             .unwrap();
@@ -232,6 +260,8 @@ impl Database {
                 folder_path: row.get(7)?,
                 file_size: row.get(8)?,
                 created_at: row.get(9)?,
+                favorite: row.get::<_, i64>(10)? != 0,
+                tags: row.get(11)?,
             })
         })
         .unwrap()

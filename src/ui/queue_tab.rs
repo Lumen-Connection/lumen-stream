@@ -156,7 +156,7 @@ fn enqueue_input(app: &mut App) {
 
 fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
     // Snapshot para não segurar o lock enquanto desenha.
-    let snapshot: Vec<(u64, String, String, JobStatus, Option<f32>)> = app
+    let snapshot: Vec<(u64, String, String, JobStatus, Option<f32>, f32, u64)> = app
         .queue
         .jobs
         .lock()
@@ -168,7 +168,7 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
             } else {
                 j.title.clone()
             };
-            (j.id, title, j.format.clone(), j.status.clone(), j.progress)
+            (j.id, title, j.format.clone(), j.status.clone(), j.progress, j.speed, j.eta)
         })
         .collect();
 
@@ -189,12 +189,13 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
 
     let mut cancel_id: Option<u64> = None;
     let mut move_action: Option<(u64, bool)> = None; // (id, para_cima)
+    let mut top_action: Option<u64> = None; // "baixar agora"
     let mut pause_id: Option<u64> = None;
     let mut resume_id: Option<u64> = None;
 
     theme::card_frame().show(ui, |ui| {
         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-            for (id, title, format, status, progress) in &snapshot {
+            for (id, title, format, status, progress, speed, eta) in &snapshot {
                 ui.horizontal(|ui| {
                     // Status colorido
                     let (label, color) = status_label(status, s);
@@ -210,24 +211,43 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
                                 .size(13.0),
                         );
                         match status {
-                            JobStatus::Running => match progress {
-                                Some(p) => {
-                                    ui.add(
-                                        egui::ProgressBar::new(*p)
-                                            .desired_width(420.0)
-                                            .fill(theme::accent())
-                                            .show_percentage(),
+                            JobStatus::Running => {
+                                match progress {
+                                    Some(p) => {
+                                        ui.add(
+                                            egui::ProgressBar::new(*p)
+                                                .desired_width(330.0)
+                                                .fill(theme::accent())
+                                                .show_percentage(),
+                                        );
+                                    }
+                                    None => {
+                                        ui.add(
+                                            egui::ProgressBar::new(0.0)
+                                                .desired_width(330.0)
+                                                .fill(theme::accent())
+                                                .animate(true),
+                                        );
+                                    }
+                                }
+                                // Velocidade + ETA do item.
+                                if *speed > 0.0 {
+                                    let eta_txt = if *eta > 0 {
+                                        format!(" · ETA {}:{:02}", eta / 60, eta % 60)
+                                    } else {
+                                        String::new()
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{}/s{}",
+                                            crate::download::engine::format_size(*speed as i64),
+                                            eta_txt
+                                        ))
+                                        .color(theme::text_muted())
+                                        .size(11.0),
                                     );
                                 }
-                                None => {
-                                    ui.add(
-                                        egui::ProgressBar::new(0.0)
-                                            .desired_width(420.0)
-                                            .fill(theme::accent())
-                                            .animate(true),
-                                    );
-                                }
-                            },
+                            }
                             JobStatus::Failed(e) => {
                                 ui.label(
                                     egui::RichText::new(truncate(e, 70))
@@ -274,6 +294,23 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
                             }
                             // Reordenar (apenas itens ainda na fila).
                             if matches!(status, JobStatus::Queued) {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("⚡").color(theme::accent()),
+                                        )
+                                        .fill(theme::bg_card())
+                                        .min_size(egui::vec2(26.0, 26.0)),
+                                    )
+                                    .on_hover_text(if app.config.lang == crate::ui::i18n::Lang::Pt {
+                                        "Baixar agora"
+                                    } else {
+                                        "Download now"
+                                    })
+                                    .clicked()
+                                {
+                                    top_action = Some(*id);
+                                }
                                 if ui
                                     .add(
                                         egui::Button::new(
@@ -339,6 +376,9 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
         } else {
             app.queue.move_down(id);
         }
+    }
+    if let Some(id) = top_action {
+        app.queue.move_to_top(id);
     }
 }
 

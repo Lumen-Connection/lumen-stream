@@ -115,11 +115,20 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             if ui.add(theme::ghost_button(s.thumbnail_only)).clicked() {
                 thumbnail = true;
             }
-            ui.label(
-                egui::RichText::new(s.transcribe_hint)
-                    .color(theme::text_faint())
-                    .size(12.0),
-            );
+            if ui.add(theme::ghost_button(s.paste_download)).clicked() {
+                if let Some(text) = theme::paste_clipboard() {
+                    let url = text.trim().to_string();
+                    if !url.is_empty() {
+                        app.music_url = url.clone();
+                        app.start_url_download(url, MediaType::Music);
+                    }
+                }
+            }
+            if app.last_download.is_some()
+                && ui.add(theme::ghost_button(s.repeat_last)).clicked()
+            {
+                app.repeat_last_download();
+            }
         });
     });
     if submit {

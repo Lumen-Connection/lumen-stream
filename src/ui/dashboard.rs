@@ -19,19 +19,21 @@ pub fn render(app: &mut App, ctx: &egui::Context) {
                 }),
         )
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| match app.active_tab {
-                Tab::Home => crate::ui::home_tab::render(app, ctx, ui),
-                Tab::Music => crate::ui::music_tab::render(app, ctx, ui),
-                Tab::Video => crate::ui::video_tab::render(app, ctx, ui),
-                Tab::Converter => crate::ui::converter_tab::render(app, ctx, ui),
-                Tab::Queue => crate::ui::queue_tab::render(app, ctx, ui),
-                Tab::Folders => crate::ui::folders_tab::render(app, ctx, ui),
-                Tab::Gallery => crate::ui::gallery_tab::render(app, ctx, ui),
-                Tab::Cloud => crate::ui::cloud_tab::render(app, ctx, ui),
-                Tab::Stats => crate::ui::stats_tab::render(app, ctx, ui),
-                Tab::Achievements => crate::ui::achievements_tab::render(app, ctx, ui),
-                Tab::Settings => crate::ui::settings_tab::render(app, ctx, ui),
-                Tab::Help => crate::ui::help_tab::render(app, ctx, ui),
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // Centraliza o conteúdo limitando a uma largura máxima em telas largas.
+                const MAX_W: f32 = 1080.0;
+                let pad = ((ui.available_width() - MAX_W) / 2.0).max(0.0);
+                egui::Frame::none()
+                    .inner_margin(egui::Margin {
+                        left: pad,
+                        right: pad,
+                        top: 0.0,
+                        bottom: 0.0,
+                    })
+                    .show(ui, |ui| {
+                        let tab = app.active_tab;
+                        render_tab_content(app, ctx, ui, tab);
+                    });
             });
         });
 
@@ -41,6 +43,376 @@ pub fn render(app: &mut App, ctx: &egui::Context) {
     render_info_window(app, ctx);
     render_qr_window(app, ctx);
     render_command_palette(app, ctx);
+    render_tag_editor(app, ctx);
+    render_tags_dialog(app, ctx);
+    render_confirm_clear(app, ctx);
+    render_orphans(app, ctx);
+    render_onboarding(app, ctx);
+    render_detached(app, ctx);
+}
+
+/// Janela de boas-vindas (primeira execução).
+fn render_onboarding(app: &mut App, ctx: &egui::Context) {
+    if app.config.onboarded {
+        return;
+    }
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
+    egui::Window::new(if pt { "Bem-vindo ao Lumen Downloader" } else { "Welcome to Lumen Downloader" })
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.label(
+                egui::RichText::new(if pt {
+                    "Baixe vídeos e músicas de centenas de sites, converta arquivos e muito mais."
+                } else {
+                    "Download videos and music from hundreds of sites, convert files and more."
+                })
+                .color(theme::text())
+                .size(14.0),
+            );
+            ui.add_space(10.0);
+            let tips: &[&str] = if pt {
+                &[
+                    "Cole um link em Baixar Vídeo/Música e clique em Download.",
+                    "Use a Fila para vários links ou playlists.",
+                    "Lumen Converter: formatos, PDF, marca d'água e transcrição.",
+                    "Ctrl+K abre a paleta de comandos; F11 = tela cheia.",
+                    "Tudo offline: yt-dlp/ffmpeg são baixados automaticamente.",
+                ]
+            } else {
+                &[
+                    "Paste a link in Download Video/Music and click Download.",
+                    "Use the Queue for multiple links or playlists.",
+                    "Lumen Converter: formats, PDF, watermark and transcription.",
+                    "Ctrl+K opens the command palette; F11 = fullscreen.",
+                    "Self-contained: yt-dlp/ffmpeg download automatically.",
+                ]
+            };
+            for t in tips {
+                ui.label(egui::RichText::new(format!("•  {}", t)).color(theme::text_muted()).size(13.0));
+            }
+            ui.add_space(14.0);
+            if ui
+                .add(theme::accent_button(if pt { "Começar" } else { "Get started" }).min_size(egui::vec2(140.0, 38.0)))
+                .clicked()
+            {
+                app.config.onboarded = true;
+                app.config.save();
+            }
+        });
+}
+
+/// Janela com a lista de arquivos órfãos (no disco, fora do histórico).
+fn render_orphans(app: &mut App, ctx: &egui::Context) {
+    let Some(list) = app.orphans.clone() else {
+        return;
+    };
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
+    let mut close = false;
+    let mut delete: Option<std::path::PathBuf> = None;
+    egui::Window::new(if pt { "Arquivos órfãos" } else { "Orphan files" })
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.set_width(580.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} {}",
+                    list.len(),
+                    if pt { "arquivo(s) fora do histórico" } else { "file(s) not in history" }
+                ))
+                .color(theme::text_muted())
+                .size(12.0),
+            );
+            ui.add_space(6.0);
+            if list.is_empty() {
+                ui.label(
+                    egui::RichText::new(if pt { "Nada encontrado. 🎉" } else { "Nothing found. 🎉" })
+                        .color(theme::text_faint()),
+                );
+            }
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for p in &list {
+                    ui.horizontal(|ui| {
+                        if ui.add(theme::ghost_button("📂")).clicked() {
+                            if let Some(parent) = p.parent() {
+                                open::that(parent).ok();
+                            }
+                        }
+                        if ui.add(theme::ghost_button("🗑")).clicked() {
+                            delete = Some(p.clone());
+                        }
+                        ui.label(
+                            egui::RichText::new(
+                                p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                            )
+                            .color(theme::text())
+                            .size(12.0),
+                        );
+                    });
+                }
+            });
+            ui.add_space(8.0);
+            if ui.add(theme::ghost_button(if pt { "Fechar" } else { "Close" })).clicked() {
+                close = true;
+            }
+        });
+    if let Some(p) = delete {
+        std::fs::remove_file(&p).ok();
+        if let Some(v) = app.orphans.as_mut() {
+            v.retain(|x| x != &p);
+        }
+    }
+    if close {
+        app.orphans = None;
+    }
+}
+
+/// Diálogo de confirmação ao limpar o histórico.
+fn render_confirm_clear(app: &mut App, ctx: &egui::Context) {
+    let Some(mt) = app.pending_clear.clone() else {
+        return;
+    };
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
+    let mut confirm = false;
+    let mut cancel = false;
+    egui::Window::new(if pt { "Limpar histórico?" } else { "Clear history?" })
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(if pt {
+                    "Isso move todos os itens para a lixeira."
+                } else {
+                    "This moves all items to the trash."
+                })
+                .color(theme::text_muted()),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.add(theme::accent_button(if pt { "Limpar" } else { "Clear" })).clicked() {
+                    confirm = true;
+                }
+                if ui.add(theme::ghost_button(if pt { "Cancelar" } else { "Cancel" })).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+    if confirm {
+        app.db.clear_history(&mt);
+        app.pending_clear = None;
+    } else if cancel {
+        app.pending_clear = None;
+    }
+}
+
+/// Despacha o conteúdo de uma aba (reusado pela janela principal e pelas destacadas).
+pub fn render_tab_content(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui, tab: Tab) {
+    match tab {
+        Tab::Home => crate::ui::home_tab::render(app, ctx, ui),
+        Tab::Music => crate::ui::music_tab::render(app, ctx, ui),
+        Tab::Video => crate::ui::video_tab::render(app, ctx, ui),
+        Tab::Converter => crate::ui::converter_tab::render(app, ctx, ui),
+        Tab::Queue => crate::ui::queue_tab::render(app, ctx, ui),
+        Tab::Folders => crate::ui::folders_tab::render(app, ctx, ui),
+        Tab::Gallery => crate::ui::gallery_tab::render(app, ctx, ui),
+        Tab::Cloud => crate::ui::cloud_tab::render(app, ctx, ui),
+        Tab::Stats => crate::ui::stats_tab::render(app, ctx, ui),
+        Tab::Achievements => crate::ui::achievements_tab::render(app, ctx, ui),
+        Tab::Settings => crate::ui::settings_tab::render(app, ctx, ui),
+        Tab::Help => crate::ui::help_tab::render(app, ctx, ui),
+    }
+}
+
+/// Título curto de uma aba (para a barra de título da janela destacada).
+fn tab_title(tab: Tab, s: &crate::ui::i18n::Strings) -> &'static str {
+    match tab {
+        Tab::Home => s.nav_home,
+        Tab::Music => s.nav_music,
+        Tab::Video => s.nav_video,
+        Tab::Converter => s.nav_converter,
+        Tab::Queue => s.nav_queue,
+        Tab::Folders => s.nav_folders,
+        Tab::Gallery => s.nav_gallery,
+        Tab::Cloud => s.nav_cloud,
+        Tab::Stats => s.nav_stats,
+        Tab::Achievements => s.nav_achievements,
+        Tab::Settings => s.nav_settings,
+        Tab::Help => s.nav_help,
+    }
+}
+
+/// Renderiza as abas destacadas em janelas próprias (multi-janela).
+fn render_detached(app: &mut App, ctx: &egui::Context) {
+    let s = crate::ui::i18n::s(app.config.lang);
+    let tabs = app.detached.clone();
+    for tab in tabs {
+        let mut close = false;
+        let id = egui::ViewportId::from_hash_of(("lumen_detached", tab));
+        let title = format!("Lumen — {}", tab_title(tab, &s));
+        ctx.show_viewport_immediate(
+            id,
+            egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size([900.0, 640.0]),
+            |vctx, _class| {
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::none()
+                            .fill(theme::bg_app())
+                            .inner_margin(egui::Margin::same(24.0)),
+                    )
+                    .show(vctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            render_tab_content(app, vctx, ui, tab);
+                        });
+                    });
+                if vctx.input(|i| i.viewport().close_requested()) {
+                    close = true;
+                }
+            },
+        );
+        if close {
+            app.detached.retain(|t| *t != tab);
+        }
+    }
+}
+
+/// Diálogo de categorias/tags de um item do histórico.
+fn render_tags_dialog(app: &mut App, ctx: &egui::Context) {
+    if app.history_tag_edit.is_none() {
+        return;
+    }
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
+    let mut save: Option<(i64, String)> = None;
+    let mut cancel = false;
+    egui::Window::new(if pt { "Categorias / tags" } else { "Categories / tags" })
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .resizable(false)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            ui.set_width(320.0);
+            ui.label(
+                egui::RichText::new(if pt {
+                    "Separe por vírgula (ex.: estudo, favoritos, trabalho)"
+                } else {
+                    "Separate by comma (e.g. study, favorites, work)"
+                })
+                .color(theme::text_muted())
+                .size(12.0),
+            );
+            ui.add_space(6.0);
+            if let Some((_, tags)) = app.history_tag_edit.as_mut() {
+                ui.add(
+                    egui::TextEdit::singleline(tags)
+                        .desired_width(f32::INFINITY)
+                        .text_color(theme::text()),
+                );
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.add(theme::accent_button(if pt { "Salvar" } else { "Save" })).clicked() {
+                    if let Some((id, tags)) = &app.history_tag_edit {
+                        save = Some((*id, tags.clone()));
+                    }
+                }
+                if ui.add(theme::ghost_button(if pt { "Cancelar" } else { "Cancel" })).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+    if let Some((id, tags)) = save {
+        app.db.set_tags(id, tags.trim());
+        app.history_tag_edit = None;
+    } else if cancel {
+        app.history_tag_edit = None;
+    }
+}
+
+/// Janela do editor de tags ID3 (+ detectar BPM).
+fn render_tag_editor(app: &mut App, ctx: &egui::Context) {
+    if app.tag_editor.is_none() {
+        return;
+    }
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
+    let mut save = false;
+    let mut cancel = false;
+    let mut detect = false;
+
+    egui::Window::new(if pt { "Editar tags" } else { "Edit tags" })
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .resizable(false)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            let ed = app.tag_editor.as_mut().unwrap();
+            ui.set_width(360.0);
+            let field = |ui: &mut egui::Ui, label: &str, val: &mut String| {
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        egui::vec2(90.0, 22.0),
+                        egui::Label::new(egui::RichText::new(label).color(theme::text_muted())),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(val)
+                            .desired_width(f32::INFINITY)
+                            .text_color(theme::text()),
+                    );
+                });
+            };
+            field(ui, if pt { "Título" } else { "Title" }, &mut ed.t.title);
+            field(ui, if pt { "Artista" } else { "Artist" }, &mut ed.t.artist);
+            field(ui, if pt { "Álbum" } else { "Album" }, &mut ed.t.album);
+            field(ui, if pt { "Ano" } else { "Year" }, &mut ed.t.year);
+            field(ui, if pt { "Gênero" } else { "Genre" }, &mut ed.t.genre);
+            field(ui, if pt { "Faixa" } else { "Track" }, &mut ed.t.track);
+            field(ui, if pt { "Tom" } else { "Key" }, &mut ed.t.key);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    egui::vec2(90.0, 22.0),
+                    egui::Label::new(egui::RichText::new("BPM").color(theme::text_muted())),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut ed.t.bpm)
+                        .desired_width(80.0)
+                        .text_color(theme::text()),
+                );
+                if ed.detecting {
+                    ui.add(egui::Spinner::new().size(14.0));
+                } else if ui
+                    .add(theme::ghost_button(if pt { "Detectar" } else { "Detect" }))
+                    .clicked()
+                {
+                    detect = true;
+                }
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(theme::accent_button(if pt { "Salvar" } else { "Save" }))
+                    .clicked()
+                {
+                    save = true;
+                }
+                if ui
+                    .add(theme::ghost_button(if pt { "Cancelar" } else { "Cancel" }))
+                    .clicked()
+                {
+                    cancel = true;
+                }
+            });
+        });
+
+    if detect {
+        app.detect_bpm_editor();
+    }
+    if save {
+        app.save_tags();
+    } else if cancel {
+        app.tag_editor = None;
+    }
 }
 
 /// Paleta de comandos (Ctrl+K) e caixa de ferramentas rápida.
@@ -246,13 +618,14 @@ fn render_inspector(app: &mut App, ctx: &egui::Context) {
 }
 
 /// Notificações in-app, empilhadas no canto inferior direito.
-fn render_toasts(app: &App, ctx: &egui::Context) {
+fn render_toasts(app: &mut App, ctx: &egui::Context) {
     if app.toasts.is_empty() {
         return;
     }
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
+    let mut undo_id: Option<i64> = None;
     egui::Area::new("toasts".into())
         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
-        .interactable(false)
         .show(ctx, |ui| {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
                 for t in app.toasts.iter().rev() {
@@ -264,16 +637,31 @@ fn render_toasts(app: &App, ctx: &egui::Context) {
                         .inner_margin(egui::Margin::symmetric(14.0, 10.0))
                         .show(ui, |ui| {
                             ui.set_max_width(360.0);
-                            ui.label(
-                                egui::RichText::new(&t.text)
-                                    .color(theme::text())
-                                    .size(13.0),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&t.text)
+                                        .color(theme::text())
+                                        .size(13.0),
+                                );
+                                if let Some(id) = t.undo {
+                                    if ui
+                                        .add(theme::ghost_button(if pt { "Desfazer" } else { "Undo" }))
+                                        .clicked()
+                                    {
+                                        undo_id = Some(id);
+                                    }
+                                }
+                            });
                         });
                     ui.add_space(6.0);
                 }
             });
         });
+    if let Some(id) = undo_id {
+        app.db.restore_history(id);
+        app.toasts.retain(|t| t.undo != Some(id));
+        app.toast(if pt { "Restaurado" } else { "Restored" }, false);
+    }
 }
 
 fn render_sidebar(app: &mut App, ctx: &egui::Context) {
@@ -330,6 +718,23 @@ fn render_sidebar(app: &mut App, ctx: &egui::Context) {
                     {
                         app.cmd_palette_open = true;
                         app.cmd_query.clear();
+                    }
+                    // Destacar a aba atual numa janela própria.
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("⧉").size(15.0))
+                                .fill(egui::Color32::TRANSPARENT),
+                        )
+                        .on_hover_text(if app.config.lang == crate::ui::i18n::Lang::Pt {
+                            "Abrir aba em nova janela"
+                        } else {
+                            "Open tab in a new window"
+                        })
+                        .clicked()
+                    {
+                        if !app.detached.contains(&app.active_tab) {
+                            app.detached.push(app.active_tab);
+                        }
                     }
                 });
             });
@@ -535,6 +940,30 @@ fn open_folder(path: &str) {
     }
 }
 
+/// Mini-gráfico (sparkline) da velocidade de download.
+fn sparkline(ui: &mut egui::Ui, data: &[f32]) {
+    let w = ui.available_width().min(340.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 48.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, egui::Rounding::same(6.0), theme::bg_card());
+    if data.len() < 2 {
+        return;
+    }
+    let max = data.iter().cloned().fold(1.0f32, f32::max);
+    let n = data.len();
+    let pts: Vec<egui::Pos2> = data
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let x = rect.min.x + 6.0 + (rect.width() - 12.0) * (i as f32 / (n - 1) as f32);
+            let y = rect.max.y - 6.0 - (rect.height() - 12.0) * (v / max);
+            egui::pos2(x, y)
+        })
+        .collect();
+    ui.painter()
+        .add(egui::Shape::line(pts, egui::Stroke::new(2.0, theme::accent())));
+}
+
 /// Mostra miniatura, canal, duração, resoluções, tamanho estimado e espaço livre.
 fn render_preview(
     ui: &mut egui::Ui,
@@ -678,6 +1107,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
     }
 
     let s = crate::ui::i18n::s(app.config.lang);
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
 
     match &phase {
         DownloadPhase::Idle => {}
@@ -849,6 +1279,34 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                         });
                     }
                     ui.add_space(6.0);
+
+                    // Perfis de download (presets) aplicáveis a este tipo.
+                    if !is_convert {
+                        let mt_id = if media_type == MediaType::Music { "music" } else { "video" };
+                        let profiles: Vec<(String, String, String)> = app
+                            .config
+                            .profiles
+                            .iter()
+                            .filter(|p| p.media_type == mt_id)
+                            .map(|p| (p.name.clone(), p.format.clone(), p.quality.clone()))
+                            .collect();
+                        if !profiles.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    egui::RichText::new(if pt { "Perfil:" } else { "Profile:" })
+                                        .color(theme::text_muted())
+                                        .size(12.0),
+                                );
+                                for (name, pf, pq) in &profiles {
+                                    if ui.add(theme::ghost_button(name)).clicked() {
+                                        new_format = pf.clone();
+                                        new_quality = pq.clone();
+                                    }
+                                }
+                            });
+                            ui.add_space(6.0);
+                        }
+                    }
 
                     ui.label(if is_convert { s.f_format_to } else { s.f_format });
                     ui.horizontal_wrapped(|ui| {
@@ -1156,11 +1614,13 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                             )
                                             .await
                                         } else {
-                                            let on_progress = move |p: f64| {
-                                                if let Ok(mut s) = progress_state.lock() {
-                                                    s.progress = Some(p.clamp(0.0, 1.0) as f32);
-                                                }
-                                            };
+                                            let on_progress =
+                                                move |pr: crate::download::engine::Progress| {
+                                                    if let Ok(mut s) = progress_state.lock() {
+                                                        s.progress =
+                                                            Some((pr.fraction.clamp(0.0, 1.0)) as f32);
+                                                    }
+                                                };
                                             let opts = crate::download::engine::DownloadOptions {
                                                 is_audio: captured_media_type == MediaType::Music,
                                                 format: captured_format.clone(),
@@ -1262,10 +1722,15 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
 
         DownloadPhase::Downloading(msg) => {
             let mut cancel = false;
+            let (speed, hist) = app
+                .engine
+                .as_ref()
+                .map(|e| e.net_stats())
+                .unwrap_or((0.0, Vec::new()));
             egui::Window::new("Baixando")
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .resizable(false)
-                .fixed_size([400.0, 150.0])
+                .fixed_size([400.0, 230.0])
                 .show(ctx, |ui: &mut egui::Ui| {
                     ui.vertical_centered(|ui: &mut egui::Ui| {
                         ui.label(msg.as_str());
@@ -1287,7 +1752,18 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 );
                             }
                         }
-                        ui.add_space(12.0);
+                        // Dashboard de rede: velocidade atual + gráfico ao vivo.
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "⬇  {}/s",
+                                crate::download::engine::format_size(speed as i64)
+                            ))
+                            .color(theme::accent())
+                            .strong(),
+                        );
+                        sparkline(ui, &hist);
+                        ui.add_space(8.0);
                         if ui
                             .add(
                                 egui::Button::new(

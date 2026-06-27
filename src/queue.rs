@@ -31,6 +31,20 @@ pub struct QueueJob {
     pub folder: PathBuf,
     pub status: JobStatus,
     pub progress: Option<f32>,
+    pub retries: u32,
+    pub speed: f32, // bytes/s
+    pub eta: u64,   // segundos
+}
+
+/// Forma serializável de um item da fila (para persistir e retomar).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedJob {
+    url: String,
+    title: String,
+    media_type: MediaType,
+    format: String,
+    quality: String,
+    folder: PathBuf,
 }
 
 type Jobs = Arc<Mutex<Vec<QueueJob>>>;
@@ -52,6 +66,68 @@ impl Queue {
         }
     }
 
+    /// Assinatura barata do estado da fila (para detectar mudanças e salvar).
+    pub fn signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for j in self.jobs.lock().unwrap().iter() {
+            j.id.hash(&mut h);
+            std::mem::discriminant(&j.status).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Salva os itens não concluídos da fila num JSON (para retomar depois).
+    pub fn save(&self, path: &std::path::Path) {
+        let saved: Vec<SavedJob> = self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|j| {
+                !matches!(j.status, JobStatus::Completed(_) | JobStatus::Cancelled)
+            })
+            .map(|j| SavedJob {
+                url: j.url.clone(),
+                title: j.title.clone(),
+                media_type: j.media_type,
+                format: j.format.clone(),
+                quality: j.quality.clone(),
+                folder: j.folder.clone(),
+            })
+            .collect();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if saved.is_empty() {
+            let _ = std::fs::remove_file(path);
+        } else if let Ok(json) = serde_json::to_string_pretty(&saved) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    /// Restaura itens salvos como "na fila" (serão reprocessados; `--continue` retoma parciais).
+    pub fn load(&mut self, path: &std::path::Path) {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(saved) = serde_json::from_str::<Vec<SavedJob>>(&content) else {
+            return;
+        };
+        for j in saved {
+            push_job(
+                &self.jobs,
+                &self.next_id,
+                j.url,
+                j.title,
+                j.media_type,
+                j.format,
+                j.quality,
+                j.folder,
+            );
+        }
+    }
+
     pub fn add(
         &self,
         url: String,
@@ -64,6 +140,15 @@ impl Queue {
         push_job(
             &self.jobs, &self.next_id, url, title, media_type, format, quality, folder,
         );
+    }
+
+    /// Move um item para o topo da fila ("baixar agora").
+    pub fn move_to_top(&self, id: u64) {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(i) = jobs.iter().position(|j| j.id == id) {
+            let job = jobs.remove(i);
+            jobs.insert(0, job);
+        }
     }
 
     pub fn move_up(&self, id: u64) {
@@ -149,6 +234,7 @@ impl Queue {
         concurrent_fragments: u32,
         organize_by: String,
         cloud_folder: Option<String>,
+        auto_retry: bool,
     ) {
         let running = self
             .jobs
@@ -231,7 +317,9 @@ impl Queue {
                 let out_str = out.to_string_lossy().to_string();
 
                 let jobs_cb = jobs.clone();
-                let on_progress = move |p: f64| set_progress(&jobs_cb, id, p as f32);
+                let on_progress = move |pr: crate::download::engine::Progress| {
+                    set_progress(&jobs_cb, id, pr.fraction as f32, pr.speed_bps as f32, pr.eta_secs);
+                };
 
                 let subs = if is_music { None } else { subtitle_langs };
                 let opts = crate::download::engine::DownloadOptions {
@@ -274,7 +362,20 @@ impl Queue {
                             crate::notify::send("Download concluído", &title);
                         }
                     }
-                    Err(e) => set_status(&jobs, id, JobStatus::Failed(e.to_string())),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        let network = is_network_error(&msg);
+                        let mut jl = jobs.lock().unwrap();
+                        if let Some(j) = jl.iter_mut().find(|j| j.id == id) {
+                            if auto_retry && network && j.retries < 2 {
+                                j.retries += 1;
+                                j.progress = None;
+                                j.status = JobStatus::Queued; // será reprocessado
+                            } else {
+                                j.status = JobStatus::Failed(msg);
+                            }
+                        }
+                    }
                 }
             });
             self.handles.insert(id, handle);
@@ -305,6 +406,9 @@ pub fn push_job(
         folder,
         status: JobStatus::Queued,
         progress: None,
+        retries: 0,
+        speed: 0.0,
+        eta: 0,
     });
 }
 
@@ -313,14 +417,30 @@ fn set_status(jobs: &Jobs, id: u64, status: JobStatus) {
         job.status = status;
     }
 }
+
+/// Heurística: o erro parece ser de rede/temporário (para re-tentar)?
+fn is_network_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("network")
+        || m.contains("timed out")
+        || m.contains("timeout")
+        || m.contains("connection")
+        || m.contains("getaddrinfo")
+        || m.contains("temporary failure")
+        || m.contains("unable to download")
+        || m.contains("http error 5")
+        || m.contains("read error")
+}
 fn set_title(jobs: &Jobs, id: u64, title: String) {
     if let Some(job) = jobs.lock().unwrap().iter_mut().find(|j| j.id == id) {
         job.title = title;
     }
 }
-fn set_progress(jobs: &Jobs, id: u64, p: f32) {
+fn set_progress(jobs: &Jobs, id: u64, p: f32, speed: f32, eta: u64) {
     if let Some(job) = jobs.lock().unwrap().iter_mut().find(|j| j.id == id) {
         job.progress = Some(p.clamp(0.0, 1.0));
+        job.speed = speed;
+        job.eta = eta;
     }
 }
 

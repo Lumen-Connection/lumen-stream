@@ -4,6 +4,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::ui::i18n::Lang;
 
+/// Perfil de download salvo (preset de formato + qualidade por tipo).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DownloadProfile {
+    pub name: String,
+    pub media_type: String, // "music" | "video"
+    pub format: String,
+    pub quality: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Theme {
     Dark,
@@ -73,6 +82,32 @@ pub struct Config {
     /// Limpar automaticamente o nome (remover [Official Video], - Topic, etc.).
     #[serde(default = "default_true")]
     pub smart_rename: bool,
+    /// Cards de atalho da Home (ids ordenados) e os fixados (favoritos).
+    #[serde(default = "default_home_cards")]
+    pub home_cards: Vec<String>,
+    #[serde(default)]
+    pub home_pinned: Vec<String>,
+    /// Última aba aberta (id) e confirmação ao limpar histórico.
+    #[serde(default)]
+    pub last_tab: String,
+    #[serde(default)]
+    pub confirm_delete: bool,
+    /// Boas-vindas já vistas (onboarding).
+    #[serde(default)]
+    pub onboarded: bool,
+    /// Perfis de download salvos.
+    #[serde(default)]
+    pub profiles: Vec<DownloadProfile>,
+    /// Re-tentar automaticamente downloads que falharem por rede.
+    #[serde(default = "default_true")]
+    pub auto_retry: bool,
+    /// Conversão de imagens em lote: formato, largura máx (0=original) e qualidade.
+    #[serde(default = "default_img_format")]
+    pub image_format: String,
+    #[serde(default)]
+    pub image_max_width: u32,
+    #[serde(default = "default_img_quality")]
+    pub image_quality: u32,
     /// Marca d'água do usuário (caminho da imagem) e parâmetros.
     #[serde(default)]
     pub watermark_path: String,
@@ -86,6 +121,18 @@ pub struct Config {
 
 fn default_template() -> String {
     "%(title)s".to_string()
+}
+fn default_img_format() -> String {
+    "jpg".to_string()
+}
+fn default_img_quality() -> u32 {
+    85
+}
+fn default_home_cards() -> Vec<String> {
+    ["music", "video", "transcribe", "converter"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 fn default_wm_pos() -> String {
     "br".to_string()
@@ -153,6 +200,16 @@ impl Default for Config {
             transcribe_translate: false,
             filename_template: default_template(),
             smart_rename: true,
+            home_cards: default_home_cards(),
+            home_pinned: Vec::new(),
+            last_tab: String::new(),
+            confirm_delete: false,
+            onboarded: false,
+            profiles: Vec::new(),
+            auto_retry: true,
+            image_format: default_img_format(),
+            image_max_width: 0,
+            image_quality: default_img_quality(),
             watermark_path: String::new(),
             watermark_pos: default_wm_pos(),
             watermark_scale: default_wm_scale(),

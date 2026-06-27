@@ -109,6 +109,20 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             if ui.add(theme::ghost_button(s.inspect_formats)).clicked() {
                 inspect = true;
             }
+            if ui.add(theme::ghost_button(s.paste_download)).clicked() {
+                if let Some(text) = theme::paste_clipboard() {
+                    let url = text.trim().to_string();
+                    if !url.is_empty() {
+                        app.video_url = url.clone();
+                        app.start_url_download(url, MediaType::Video);
+                    }
+                }
+            }
+            if app.last_download.is_some()
+                && ui.add(theme::ghost_button(s.repeat_last)).clicked()
+            {
+                app.repeat_last_download();
+            }
         });
     });
     if submit {
