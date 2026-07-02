@@ -1,9 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use printpdf::{ColorBits, ColorSpace, Image, ImageTransform, ImageXObject, Mm, PdfDocument, Px};
+use crate::config::settings::ConvertEngine;
+
+use printpdf::{
+    BuiltinFont, ColorBits, ColorSpace, Image, ImageTransform, ImageXObject, Mm, PdfDocument, Px,
+};
 use yt_dlp::client::deps::Libraries;
 use yt_dlp::VideoSelection;
 
@@ -20,7 +25,6 @@ pub fn sanitize_filename(name: &str) -> String {
     sanitized
 }
 
-/// Tags de áudio editáveis (ID3/Vorbis/etc.) — campos vazios = ausentes.
 #[derive(Clone, Default)]
 pub struct AudioTags {
     pub title: String,
@@ -33,7 +37,6 @@ pub struct AudioTags {
     pub key: String,
 }
 
-/// Lê as tags de um arquivo de áudio (best-effort).
 pub fn read_audio_tags(path: &str) -> AudioTags {
     use lofty::prelude::{Accessor, ItemKey, TaggedFileExt};
     let mut t = AudioTags::default();
@@ -62,7 +65,6 @@ pub fn read_audio_tags(path: &str) -> AudioTags {
     t
 }
 
-/// Grava as tags num arquivo de áudio.
 pub fn write_audio_tags(path: &str, t: &AudioTags) -> Result<(), Box<dyn std::error::Error>> {
     use lofty::config::WriteOptions;
     use lofty::prelude::{Accessor, ItemKey, TagExt, TaggedFileExt};
@@ -114,7 +116,6 @@ pub fn write_audio_tags(path: &str, t: &AudioTags) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// Limpa "ruído" comum de títulos: [Official Video], (Audio), - Topic, etc.
 pub fn smart_clean_name(title: &str) -> String {
     const JUNK: &[&str] = &[
         "official", "oficial", "video", "vídeo", "audio", "áudio", "lyric", "letra",
@@ -157,7 +158,6 @@ pub fn smart_clean_name(title: &str) -> String {
     }
 }
 
-/// Aplica o template de nome de arquivo (tokens: %(title)s, %(uploader)s, %(channel)s).
 pub fn apply_template(template: &str, title: &str, channel: &str) -> String {
     let mut s = template.replace("%(title)s", title);
     s = s.replace("%(uploader)s", channel).replace("%(channel)s", channel);
@@ -167,18 +167,17 @@ pub fn apply_template(template: &str, title: &str, channel: &str) -> String {
     s
 }
 
-/// Progresso de um download (fração 0..1, velocidade em bytes/s, ETA em segundos).
 #[derive(Clone, Copy, Default)]
 pub struct Progress {
     pub fraction: f64,
     pub speed_bps: f64,
     pub eta_secs: u64,
+    pub downloaded_bytes: u64,
 }
 
-/// Estatísticas de rede em tempo real (velocidade atual + histórico p/ gráfico).
 #[derive(Default)]
 pub struct NetStats {
-    pub current: f32, // bytes/s
+    pub current: f32,
     pub history: Vec<f32>,
 }
 
@@ -186,9 +185,7 @@ pub struct DownloadEngine {
     downloader: yt_dlp::Downloader,
     ffmpeg_path: PathBuf,
     libs_dir: PathBuf,
-    /// Cache de pré-visualizações por URL (título/thumbnail/etc.) na sessão.
     preview_cache: Mutex<HashMap<String, VideoPreview>>,
-    /// Velocidade de download em tempo real (dashboard de rede).
     net: Mutex<NetStats>,
 }
 
@@ -208,7 +205,6 @@ impl DownloadEngine {
         let libs_dir = data_dir.join("libs");
         std::fs::create_dir_all(&libs_dir)?;
         std::fs::create_dir_all(&output_dir)?;
-        // Remove restos de downloads interrompidos anteriormente.
         cleanup_temp_dir(&output_dir);
 
         let libraries = Libraries::new(
@@ -216,15 +212,10 @@ impl DownloadEngine {
             binary_path(&libs_dir, "ffmpeg"),
         );
 
-        // Baixa o yt-dlp e o ffmpeg na primeira execução (idempotente: pula se já existirem).
-        // Sem isso os binários não existem e qualquer operação falha com
-        // "IO error during File operation".
         let libraries = libraries.install_dependencies().await?;
         let ffmpeg_path = libraries.ffmpeg.clone();
 
         let downloader = yt_dlp::Downloader::builder(libraries, &output_dir)
-            // O padrão da lib é 300s; merges/conversões de vídeos longos podem
-            // estourar esse limite. 30 min cobre com folga.
             .with_timeout(Duration::from_secs(1800))
             .build()
             .await?;
@@ -238,14 +229,11 @@ impl DownloadEngine {
         })
     }
 
-    /// Velocidade de download atual (bytes/s) e histórico recente para o gráfico.
     pub fn net_stats(&self) -> (f32, Vec<f32>) {
         let n = self.net.lock().unwrap();
         (n.current, n.history.clone())
     }
 
-    /// Resolve a fonte: links do Spotify viram uma busca no YouTube (`ytsearch1:`)
-    /// pela faixa correspondente (o Spotify não é baixável diretamente).
     pub async fn resolve_source(&self, url: &str) -> String {
         let u = url.trim();
         if u.contains("spotify.com/track") {
@@ -276,13 +264,10 @@ impl DownloadEngine {
         Ok(video.title.clone())
     }
 
-    /// Busca informações ricas para a pré-visualização (título, canal, duração,
-    /// resoluções disponíveis e tamanho estimado).
     pub async fn fetch_preview(
         &self,
         url: &str,
     ) -> Result<VideoPreview, Box<dyn std::error::Error>> {
-        // Cache de sessão: evita refazer fetch + download da miniatura.
         if let Some(cached) = self.preview_cache.lock().unwrap().get(url).cloned() {
             return Ok(cached);
         }
@@ -311,7 +296,6 @@ impl DownloadEngine {
         let best_audio = video
             .best_audio_format()
             .and_then(|f| f.file_info.filesize.or(f.file_info.filesize_approx));
-        // Sites só com formato combinado (Twitter/X): usa o tamanho do combinado.
         let best_combined = video
             .formats
             .iter()
@@ -346,6 +330,7 @@ impl DownloadEngine {
             est_size_video,
             est_size_audio: best_audio,
             thumbnail,
+            is_live: video.is_live.unwrap_or(false) || video.live_status == "is_live",
         };
         self.preview_cache
             .lock()
@@ -354,7 +339,6 @@ impl DownloadEngine {
         Ok(preview)
     }
 
-    /// Gera uma miniatura (JPG) de um vídeo extraindo um quadro representativo.
     pub async fn generate_thumbnail(
         &self,
         video: &str,
@@ -381,8 +365,6 @@ impl DownloadEngine {
         Ok(())
     }
 
-    /// Estima o BPM de um áudio: extrai PCM mono com o ffmpeg e roda
-    /// autocorrelação do envelope de energia (aproximado).
     pub async fn detect_bpm(&self, file: &str) -> Result<u32, Box<dyn std::error::Error>> {
         const SR: usize = 11025;
         const FRAME: usize = 512;
@@ -405,7 +387,6 @@ impl DownloadEngine {
             return Err("não foi possível ler o áudio".into());
         }
 
-        // Envelope de energia por frame.
         let samples: Vec<i16> = output
             .stdout
             .chunks_exact(2)
@@ -419,7 +400,6 @@ impl DownloadEngine {
             let e: f64 = frame.iter().map(|&s| (s as f64) * (s as f64)).sum();
             energy.push((e / frame.len() as f64) as f32);
         }
-        // Fluxo de onset (só aumentos de energia).
         let onset: Vec<f32> = energy
             .windows(2)
             .map(|w| (w[1] - w[0]).max(0.0))
@@ -428,8 +408,7 @@ impl DownloadEngine {
             return Err("áudio insuficiente para estimar BPM".into());
         }
 
-        // Autocorrelação no intervalo de 60..180 BPM.
-        let frame_period = FRAME as f32 / SR as f32; // s por frame
+        let frame_period = FRAME as f32 / SR as f32;
         let lag_for = |bpm: f32| ((60.0 / bpm) / frame_period).round() as usize;
         let (lag_min, lag_max) = (lag_for(180.0).max(1), lag_for(60.0));
         let mut best_lag = lag_min;
@@ -448,15 +427,12 @@ impl DownloadEngine {
         Ok(bpm.clamp(40, 220))
     }
 
-    /// Lê metadados de um arquivo de mídia com o ffmpeg (codec, duração, etc.).
     pub async fn probe_metadata(&self, file: &str) -> Result<String, Box<dyn std::error::Error>> {
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-hide_banner").arg("-i").arg(file);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
         let output = cmd.output().await?;
-        // O ffmpeg imprime as infos de formato/streams no stderr (e sai com erro
-        // por não ter saída — isso é esperado).
         let text = String::from_utf8_lossy(&output.stderr);
         let mut lines: Vec<String> = Vec::new();
         for l in text.lines() {
@@ -480,8 +456,6 @@ impl DownloadEngine {
         Ok(lines.join("\n"))
     }
 
-    /// Baixa de qualquer site usando o yt-dlp diretamente (mais confiável que o
-    /// downloader HTTP do crate, que falha com URLs do googlevideo do YouTube).
     pub async fn fetch_and_download<F>(
         &self,
         url: &str,
@@ -504,7 +478,6 @@ impl DownloadEngine {
         binary_path(&self.libs_dir, "yt-dlp")
     }
 
-    /// Obtém o título de um link via yt-dlp (para sites não-YouTube).
     async fn ytdlp_title(&self, url: &str) -> Result<String, Box<dyn std::error::Error>> {
         let mut cmd = tokio::process::Command::new(self.ytdlp_path());
         cmd.arg("--no-warnings")
@@ -528,7 +501,6 @@ impl DownloadEngine {
         }
     }
 
-    /// Pré-visualização via yt-dlp (--dump-single-json), com parsing tolerante.
     async fn ytdlp_preview(&self, url: &str) -> Result<VideoPreview, Box<dyn std::error::Error>> {
         let mut cmd = tokio::process::Command::new(self.ytdlp_path());
         cmd.arg("--no-warnings")
@@ -572,6 +544,7 @@ impl DownloadEngine {
             None => None,
         };
 
+        let is_live = json.is_live || json.live_status.as_deref() == Some("is_live");
         Ok(VideoPreview {
             title: json.title.unwrap_or_else(|| "download".to_string()),
             channel,
@@ -580,11 +553,10 @@ impl DownloadEngine {
             est_size_video: est,
             est_size_audio: est,
             thumbnail,
+            is_live,
         })
     }
 
-    /// Download universal via yt-dlp direto, com progresso, retry/backoff,
-    /// limite de velocidade, multithread, resolução e codecs compatíveis.
     async fn ytdlp_download<F>(
         &self,
         url: &str,
@@ -606,7 +578,6 @@ impl DownloadEngine {
         let template = folder.join(format!("{}.%(ext)s", stem));
         let final_ext = opts.format.clone();
 
-        // Modo de diagnóstico: registra o que vai ser baixado.
         crate::applog::info(&format!(
             "download: url={} format={} audio={} quality={} max_height={:?} rate={:?} frags={} clip={:?}",
             url,
@@ -627,7 +598,7 @@ impl DownloadEngine {
             cmd.arg("--no-warnings")
                 .arg("--no-playlist")
                 .arg("--newline")
-                .arg("--continue") // retoma arquivos parciais nas tentativas
+                .arg("--continue")
                 .arg("--retries")
                 .arg("10")
                 .arg("--fragment-retries")
@@ -650,8 +621,12 @@ impl DownloadEngine {
             if opts.live_from_start {
                 cmd.arg("--live-from-start");
             }
+            if opts.is_live {
+                // Contêiner MPEG-TS: tolera parada/kill sem corromper (sem moov),
+                // permitindo remuxar o que já foi gravado.
+                cmd.arg("--hls-use-mpegts");
+            }
 
-            // Recorte por tempo (trim).
             if let Some((start, end)) = &opts.clip {
                 let start = start.trim();
                 let end = end.trim();
@@ -678,7 +653,6 @@ impl DownloadEngine {
                     .arg("--convert-thumbnails")
                     .arg("jpg");
             } else {
-                // Fallback de codec embutido no seletor (prefere compatível, cai no melhor).
                 let selector = match opts.format.as_str() {
                     "mp4" => "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/bv*+ba/b",
                     "webm" => "bv*[vcodec^=vp9]+ba/bv*+ba/b",
@@ -689,7 +663,6 @@ impl DownloadEngine {
                     .arg("--merge-output-format")
                     .arg(&opts.format);
 
-                // Resolução: altura explícita tem prioridade sobre o preset.
                 if let Some(h) = opts.max_height {
                     cmd.arg("-S").arg(format!("res:{}", h));
                 } else {
@@ -704,20 +677,23 @@ impl DownloadEngine {
                     }
                 }
 
-                if let Some(langs) = &opts.subtitle_langs {
-                    if !langs.trim().is_empty() {
-                        cmd.arg("--write-subs")
-                            .arg("--write-auto-subs")
-                            .arg("--sub-langs")
-                            .arg(langs)
-                            .arg("--convert-subs")
-                            .arg("srt");
+                // Legendas em live falham (fragmentos de .vtt inexistentes) e abortam
+                // a gravação — só baixamos legendas em vídeos normais.
+                if !opts.is_live {
+                    if let Some(langs) = &opts.subtitle_langs {
+                        if !langs.trim().is_empty() {
+                            cmd.arg("--write-subs")
+                                .arg("--write-auto-subs")
+                                .arg("--sub-langs")
+                                .arg(langs)
+                                .arg("--convert-subs")
+                                .arg("srt");
+                        }
                     }
                 }
             }
             cmd.arg(url);
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-            // Mata o processo do yt-dlp se a task for cancelada (cancelar download).
             cmd.kill_on_drop(true);
 
             #[cfg(windows)]
@@ -735,52 +711,78 @@ impl DownloadEngine {
                 buf
             });
 
-            // Zera o histórico de velocidade para este download.
             {
                 let mut n = self.net.lock().unwrap();
                 n.current = 0.0;
                 n.history.clear();
             }
             let mut lines = tokio::io::BufReader::new(stdout).lines();
-            let (mut last_frac, mut last_speed, mut last_eta) = (0.0f64, 0.0f64, 0u64);
-            while let Ok(Some(line)) = lines.next_line().await {
-                let mut changed = false;
-                if let Some(p) = parse_ytdlp_percent(&line) {
-                    last_frac = p;
-                    changed = true;
-                }
-                if let Some(spd) = parse_ytdlp_speed(&line) {
-                    last_speed = spd;
-                    changed = true;
-                    let mut n = self.net.lock().unwrap();
-                    n.current = spd as f32;
-                    n.history.push(spd as f32);
-                    if n.history.len() > 160 {
-                        n.history.remove(0);
+            let (mut last_frac, mut last_speed, mut last_eta, mut last_bytes) =
+                (0.0f64, 0.0f64, 0u64, 0u64);
+            let stop = opts.stop.clone();
+            let mut stopped = false;
+            loop {
+                tokio::select! {
+                    line = lines.next_line() => {
+                        let Ok(Some(line)) = line else { break };
+                        let mut changed = false;
+                        if let Some(p) = parse_ytdlp_percent(&line) {
+                            last_frac = p;
+                            changed = true;
+                        }
+                        if let Some(spd) = parse_ytdlp_speed(&line) {
+                            last_speed = spd;
+                            changed = true;
+                            let mut n = self.net.lock().unwrap();
+                            n.current = spd as f32;
+                            n.history.push(spd as f32);
+                            if n.history.len() > 160 {
+                                n.history.remove(0);
+                            }
+                        }
+                        if let Some(eta) = parse_ytdlp_eta(&line) {
+                            last_eta = eta;
+                            changed = true;
+                        }
+                        if let Some(sz) = parse_ytdlp_size(&line) {
+                            last_bytes = sz;
+                            changed = true;
+                        }
+                        if changed {
+                            on_progress(Progress {
+                                fraction: last_frac,
+                                speed_bps: last_speed,
+                                eta_secs: last_eta,
+                                downloaded_bytes: last_bytes,
+                            });
+                        }
+                    }
+                    _ = wait_for_stop(&stop) => {
+                        stopped = true;
+                        let _ = child.start_kill();
+                        break;
                     }
                 }
-                if let Some(eta) = parse_ytdlp_eta(&line) {
-                    last_eta = eta;
-                    changed = true;
-                }
-                if changed {
-                    on_progress(Progress {
-                        fraction: last_frac,
-                        speed_bps: last_speed,
-                        eta_secs: last_eta,
-                    });
-                }
             }
-            // Fim do download: zera a velocidade atual.
             {
                 self.net.lock().unwrap().current = 0.0;
+            }
+
+            // Parada graciosa de gravação: mata o yt-dlp e remuxa o que já baixou.
+            if stopped {
+                let _ = child.wait().await;
+                if let Some(p) = self.finalize_live_partials(&folder, &stem, &final_ext).await {
+                    on_progress(Progress { fraction: 1.0, ..Default::default() });
+                    return Ok(p);
+                }
+                return Err("Nada foi gravado antes de parar.".into());
             }
 
             let status = child.wait().await?;
             let stderr_text = stderr_task.await.unwrap_or_default();
 
             if status.success() {
-                on_progress(Progress { fraction: 1.0, speed_bps: 0.0, eta_secs: 0 });
+                on_progress(Progress { fraction: 1.0, ..Default::default() });
                 let expected = folder.join(format!("{}.{}", stem, final_ext));
                 let result = if expected.exists() {
                     Some(expected)
@@ -803,7 +805,6 @@ impl DownloadEngine {
         Err(friendly_error(&last_err).into())
     }
 
-    /// Busca os itens de uma playlist do YouTube. Retorna pares (url, título).
     pub async fn fetch_playlist(
         &self,
         playlist_id: &str,
@@ -829,7 +830,6 @@ impl DownloadEngine {
         Ok(items)
     }
 
-    /// Rebaixa o binário do yt-dlp (força a versão mais recente).
     pub async fn update_ytdlp(&self) -> Result<String, Box<dyn std::error::Error>> {
         let yt = binary_path(&self.libs_dir, "yt-dlp");
         let _ = std::fs::remove_file(&yt);
@@ -849,11 +849,10 @@ impl DownloadEngine {
         cmd.arg("-y")
             .arg("-i")
             .arg(input)
-            .arg("-vn") // descarta qualquer stream de vídeo/capa
+            .arg("-vn")
             .arg("-map_metadata")
-            .arg("0"); // preserva as tags existentes
+            .arg("0");
 
-        // Tags fornecidas (sobrescrevem as do arquivo de origem).
         if let Some(t) = &meta.title {
             cmd.arg("-metadata").arg(format!("title={}", t));
         }
@@ -887,7 +886,6 @@ impl DownloadEngine {
         }
         cmd.arg(output);
 
-        // Evita que o ffmpeg abra uma janela de console no Windows.
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
 
@@ -900,21 +898,18 @@ impl DownloadEngine {
         Ok(())
     }
 
-    /// Converte um arquivo local de qualquer formato para o formato escolhido.
-    /// Reaproveita o ffmpeg empacotado: para formatos de áudio extrai/transcodifica
-    /// o áudio; para containers de vídeo re-encoda com os codecs padrão do container.
     pub async fn convert_file(
         &self,
         input: &str,
         output_path: &str,
         format: &str,
         preset: &str,
+        engine: ConvertEngine,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let input_path = PathBuf::from(input);
         let mut out = PathBuf::from(output_path);
         out.set_extension(format);
 
-        // Nunca sobrescreve o arquivo de origem.
         if out == input_path {
             let stem = out
                 .file_stem()
@@ -924,45 +919,184 @@ impl DownloadEngine {
         }
 
         match categorize(&input_path) {
-            // PDF de entrada → imagens ou texto.
             FileCategory::Document => {
                 if format == "txt" {
                     return self.pdf_to_text(&input_path, &out).await;
                 }
                 return self.pdf_to_images(&input_path, &out, format).await;
             }
-            // Documentos do Office → conversão via LibreOffice headless.
             FileCategory::Office => {
-                return self.office_convert(&input_path, &out, format).await;
+                return self.office_convert(&input_path, &out, format, engine).await;
             }
             _ => {}
         }
 
-        // Imagem → PDF (via printpdf, sem depender do ffmpeg).
         if format == "pdf" {
             return self.image_to_pdf(&input_path, &out).await;
         }
 
         if is_audio_format(format) {
-            // Conversão de arquivo local: preserva as tags do original (sem sobrescrever).
             self.transcode_audio(&input_path, &out, format, &AudioMeta::default())
                 .await?;
         } else {
-            // Vídeo e imagem: ffmpeg escolhe o codec pela extensão; preset ajusta
-            // compressão/escala para vídeos.
             self.transcode_media(&input_path, &out, preset).await?;
         }
         Ok(out)
     }
 
-    /// Converte documentos via LibreOffice headless (`soffice --convert-to`).
+    /// Finaliza uma gravação de live interrompida: remuxa os `.part` de vídeo/áudio
+    /// já baixados em um arquivo tocável e limpa os temporários.
+    async fn finalize_live_partials(
+        &self,
+        folder: &Path,
+        stem: &str,
+        ext: &str,
+    ) -> Option<PathBuf> {
+        // Lista os .part principais (vídeo/áudio), ignorando fragmentos -Frag.
+        let all_parts: Vec<(String, PathBuf)> = std::fs::read_dir(folder)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter_map(|p| {
+                let n = p.file_name()?.to_str()?.to_string();
+                if n.ends_with(".part") && !n.contains("-Frag") {
+                    Some((n, p))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Casa por prefixo do stem; se não achar, cai para o prefixo curto (sanitização
+        // do yt-dlp pode divergir um pouco do nome esperado).
+        let prefix = format!("{}.", stem);
+        let short: String = stem.chars().take(24).collect();
+        let mut parts: Vec<PathBuf> = all_parts
+            .iter()
+            .filter(|(n, _)| n.starts_with(&prefix) || n.starts_with(stem))
+            .map(|(_, p)| p.clone())
+            .collect();
+        if parts.is_empty() {
+            parts = all_parts
+                .iter()
+                .filter(|(n, _)| n.starts_with(&short))
+                .map(|(_, p)| p.clone())
+                .collect();
+        }
+
+        crate::applog::info(&format!(
+            "finalize live: stem=\"{}\" parts_casadas={} parts_no_dir=[{}]",
+            stem,
+            parts.len(),
+            all_parts
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+
+        if parts.is_empty() {
+            return None;
+        }
+        // Maior primeiro (o vídeo costuma ser maior que o áudio).
+        parts.sort_by_key(|p| {
+            std::cmp::Reverse(std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        });
+
+        let out = folder.join(format!("{}.{}", stem, ext));
+        let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
+        cmd.arg("-y");
+        for p in &parts {
+            cmd.arg("-i").arg(p);
+        }
+        cmd.arg("-c").arg("copy").arg(&out);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        let muxed = cmd.output().await.map(|o| o.status.success()).unwrap_or(false)
+            && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false);
+
+        let result = if muxed {
+            Some(out.clone())
+        } else {
+            // Fallback: renomeia o maior .part para um arquivo utilizável.
+            let _ = std::fs::remove_file(&out);
+            let raw = folder.join(format!("{}.{}", stem, ext));
+            if std::fs::rename(&parts[0], &raw).is_ok() {
+                Some(raw)
+            } else {
+                None
+            }
+        };
+
+        cleanup_partials(folder, stem);
+        result
+    }
+
     async fn office_convert(
         &self,
         input: &Path,
         out: &Path,
         format: &str,
+        engine: ConvertEngine,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let soffice = soffice_path();
+        // TXT é sempre extração nativa (rápida e sem dependência).
+        // Para PDF, respeita a escolha do usuário; Auto pega o melhor disponível.
+        let chosen = if format == "txt" {
+            ConvertEngine::Rust
+        } else {
+            match engine {
+                ConvertEngine::Auto => auto_pick_engine(),
+                other => other,
+            }
+        };
+
+        match chosen {
+            ConvertEngine::MsOffice => self.office_via_msoffice(input, out, format).await,
+            ConvertEngine::LibreOffice => self.office_via_libreoffice(input, out, format).await,
+            _ => self.office_via_native(input, out, format).await,
+        }
+    }
+
+    async fn office_via_native(
+        &self,
+        input: &Path,
+        out: &Path,
+        format: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let input = input.to_path_buf();
+        let out_path = out.to_path_buf();
+        let out_ret = out_path.clone();
+        let format = format.to_string();
+        let title = input
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Documento".to_string());
+
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let text = office_extract_text(&input)?;
+            match format.as_str() {
+                "txt" => std::fs::write(&out_path, text).map_err(|e| e.to_string()),
+                "pdf" => render_text_pdf(&text, &out_path, &title),
+                other => Err(format!(
+                    "Conversão nativa para \"{}\" não suportada. Use PDF ou TXT.",
+                    other
+                )),
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+        Ok(out_ret)
+    }
+
+    async fn office_via_libreoffice(
+        &self,
+        input: &Path,
+        out: &Path,
+        format: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let soffice = libreoffice_path()
+            .ok_or("LibreOffice não encontrado. Instale-o ou escolha outro motor.")?;
         let outdir = out.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
         let input_stem = input
             .file_stem()
@@ -979,19 +1113,12 @@ impl DownloadEngine {
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
 
-        let result = cmd.output().await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "LibreOffice não encontrado. Instale-o para converter documentos.".to_string()
-            } else {
-                e.to_string()
-            }
-        })?;
+        let result = cmd.output().await.map_err(|e| e.to_string())?;
         if !result.status.success() {
             let stderr = String::from_utf8_lossy(&result.stderr);
             return Err(format!("LibreOffice falhou: {}", stderr.trim()).into());
         }
 
-        // O soffice gera <stem do arquivo de entrada>.<formato> na pasta de saída.
         let produced = outdir.join(format!("{}.{}", input_stem, format));
         if produced.exists() {
             if produced != out {
@@ -1003,11 +1130,35 @@ impl DownloadEngine {
             }
             return Ok(produced);
         }
-        find_output(&outdir, &input_stem)
-            .ok_or_else(|| "Arquivo convertido não encontrado.".into())
+        Err("Arquivo convertido não encontrado.".into())
     }
 
-    /// Extrai frames de um vídeo como imagens PNG numa subpasta.
+    async fn office_via_msoffice(
+        &self,
+        input: &Path,
+        out: &Path,
+        format: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        if format != "pdf" {
+            return Err("MS Office só é usado aqui para gerar PDF.".into());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (input, out);
+            return Err("MS Office só está disponível no Windows.".into());
+        }
+        #[cfg(windows)]
+        {
+            let input = input.to_path_buf();
+            let out_path = out.to_path_buf();
+            let out_ret = out_path.clone();
+            tokio::task::spawn_blocking(move || msoffice_to_pdf(&input, &out_path))
+                .await
+                .map_err(|e| e.to_string())??;
+            Ok(out_ret)
+        }
+    }
+
     pub async fn extract_frames(
         &self,
         input: &str,
@@ -1045,8 +1196,6 @@ impl DownloadEngine {
         Ok(out_dir)
     }
 
-    /// Converte várias imagens em lote (formato, largura máx. e qualidade) com o ffmpeg.
-    /// Retorna a pasta de saída. Continua mesmo se alguma imagem falhar.
     pub async fn batch_convert_images(
         &self,
         inputs: Vec<PathBuf>,
@@ -1072,7 +1221,6 @@ impl DownloadEngine {
             }
             match format.as_str() {
                 "jpg" | "jpeg" => {
-                    // -q:v 2 (melhor) .. 31 (pior); mapeia qualidade%.
                     let qv = 2 + ((100u32.saturating_sub(quality.min(100))) * 29 / 100);
                     cmd.arg("-q:v").arg(qv.to_string());
                 }
@@ -1107,7 +1255,6 @@ impl DownloadEngine {
         Ok(out_dir)
     }
 
-    /// Transcreve áudio/vídeo para texto com o whisper.cpp (baixado sob demanda).
     pub async fn transcribe(
         &self,
         input: &str,
@@ -1126,7 +1273,6 @@ impl DownloadEngine {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "audio".to_string());
 
-        // whisper.cpp exige WAV PCM 16 kHz mono: converte com o ffmpeg.
         let wav = folder.join(format!("{}.whisper.wav", stem));
         let mut conv = tokio::process::Command::new(&self.ffmpeg_path);
         conv.arg("-y")
@@ -1148,10 +1294,8 @@ impl DownloadEngine {
             return Err(format!("ffmpeg falhou ao preparar o áudio: {}", last).into());
         }
 
-        // Executa o whisper.cpp gerando <stem>.txt.
         let out_base = folder.join(&stem);
         let mut cmd = tokio::process::Command::new(&exe);
-        // Roda a partir da pasta do binário para que as DLLs do whisper.cpp carreguem.
         if let Some(exe_dir) = exe.parent() {
             cmd.current_dir(exe_dir);
         }
@@ -1165,7 +1309,6 @@ impl DownloadEngine {
             .arg("-l")
             .arg(if lang.trim().is_empty() { "auto" } else { lang.trim() });
         if translate {
-            // Traduz a fala para inglês (recurso nativo do whisper).
             cmd.arg("-tr");
         }
         #[cfg(windows)]
@@ -1174,8 +1317,6 @@ impl DownloadEngine {
         let result = cmd.output().await?;
         let _ = std::fs::remove_file(&wav);
         if !result.status.success() {
-            // Combina stderr + stdout; uma saída vazia geralmente indica DLL ausente
-            // ou crash de inicialização do binário.
             let stderr = String::from_utf8_lossy(&result.stderr);
             let stdout = String::from_utf8_lossy(&result.stdout);
             let combined = format!("{}\n{}", stderr, stdout);
@@ -1202,14 +1343,12 @@ impl DownloadEngine {
         }
     }
 
-    /// Baixa apenas a miniatura (capa) de um link, convertida para JPG.
     pub async fn download_thumbnail_file(
         &self,
         url: &str,
         folder: &Path,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         std::fs::create_dir_all(folder).ok();
-        // Snapshot dos arquivos antes para detectar o que foi criado.
         let before: std::collections::HashSet<PathBuf> = std::fs::read_dir(folder)
             .map(|rd| rd.flatten().map(|e| e.path()).collect())
             .unwrap_or_default();
@@ -1235,7 +1374,6 @@ impl DownloadEngine {
             return Err(ytdlp_error(&output.stderr).into());
         }
 
-        // Procura o novo arquivo de imagem criado.
         let is_img = |p: &Path| {
             matches!(
                 p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
@@ -1252,7 +1390,6 @@ impl DownloadEngine {
         new_file.ok_or_else(|| "Miniatura não encontrada.".into())
     }
 
-    /// Lista os formatos disponíveis de um link (inspetor / comparar / tamanho).
     pub async fn list_formats(
         &self,
         url: &str,
@@ -1277,7 +1414,7 @@ impl DownloadEngine {
             let has_v = f.vcodec.as_deref().map(|c| c != "none").unwrap_or(false);
             let has_a = f.acodec.as_deref().map(|c| c != "none").unwrap_or(false);
             if !has_v && !has_a {
-                continue; // ignora storyboards/imagens
+                continue;
             }
             let kind = if has_v && has_a {
                 "Vídeo+Áudio"
@@ -1307,13 +1444,10 @@ impl DownloadEngine {
                 size: f.filesize.or(f.filesize_approx),
             });
         }
-        // Maiores (melhor qualidade) primeiro.
         rows.sort_by(|a, b| b.size.unwrap_or(0).cmp(&a.size.unwrap_or(0)));
         Ok(rows)
     }
 
-    /// Verifica a integridade de um arquivo de mídia com o ffmpeg.
-    /// Retorna `Ok(())` se válido, ou `Err(detalhe)` se houver erros de decodificação.
     pub async fn verify_integrity(&self, file: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-v")
@@ -1340,8 +1474,6 @@ impl DownloadEngine {
         }
     }
 
-    /// Aplica uma marca d'água (imagem) sobre um vídeo, numa posição/escala/opacidade.
-    /// `position`: "tl" | "tr" | "bl" | "br" | "center".
     pub async fn watermark_video(
         &self,
         input: &str,
@@ -1358,9 +1490,8 @@ impl DownloadEngine {
             "tr" => format!("W-w-{m}:{m}", m = margin),
             "bl" => format!("{m}:H-h-{m}", m = margin),
             "center" => "(W-w)/2:(H-h)/2".to_string(),
-            _ => format!("W-w-{m}:H-h-{m}", m = margin), // br (padrão)
+            _ => format!("W-w-{m}:H-h-{m}", m = margin),
         };
-        // Redimensiona a marca (em % do seu tamanho original) e aplica opacidade.
         let scale = (scale_pct.clamp(5, 400) as f32) / 100.0;
         let opacity = opacity.clamp(0.0, 1.0);
         let filter = format!(
@@ -1394,8 +1525,6 @@ impl DownloadEngine {
         Ok(out)
     }
 
-    /// Gera um QUADRO de pré-visualização de um vídeo já com a marca d'água aplicada
-    /// (extrai um frame representativo, aplica a marca e reduz para exibição).
     pub async fn watermark_preview(
         &self,
         video: &str,
@@ -1419,7 +1548,6 @@ impl DownloadEngine {
         };
         let scale = (scale_pct.clamp(5, 400) as f32) / 100.0;
         let opacity = opacity.clamp(0.0, 1.0);
-        // Aplica a marca no tamanho real do frame (fiel) e só então reduz o composto.
         let filter = format!(
             "[0:v]thumbnail[b];\
              [1:v]format=rgba,colorchannelmixer=aa={op},scale=iw*{sc}:-1[wm];\
@@ -1454,13 +1582,11 @@ impl DownloadEngine {
         Ok(out)
     }
 
-    /// Garante o whisper.cpp (binário + modelo), baixando na primeira vez.
     async fn ensure_whisper(&self) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
         let dir = self.libs_dir.join("whisper");
         std::fs::create_dir_all(&dir)?;
         let model = dir.join("ggml-base.bin");
 
-        // Baixa o binário do whisper.cpp (Windows) se ainda não houver.
         if find_whisper_exe(&dir).is_none() {
             #[cfg(windows)]
             {
@@ -1501,7 +1627,6 @@ impl DownloadEngine {
         let exe = find_whisper_exe(&dir)
             .ok_or("binário do whisper.cpp não encontrado após o download")?;
 
-        // Baixa o modelo (~142 MB) se necessário ou se o arquivo estiver corrompido/incompleto.
         let model_ok = std::fs::metadata(&model)
             .map(|m| m.len() > 1_000_000)
             .unwrap_or(false);
@@ -1523,8 +1648,6 @@ impl DownloadEngine {
         Ok((exe, model))
     }
 
-    /// Garante que a biblioteca pdfium esteja disponível, baixando-a sob demanda
-    /// (uma única vez) dos binários pré-compilados do bblanchon/pdfium-binaries.
     async fn ensure_pdfium(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
         use pdfium_render::prelude::Pdfium;
 
@@ -1641,7 +1764,6 @@ impl DownloadEngine {
         Ok(first)
     }
 
-    /// Junta vários PDFs num único arquivo (via pdfium).
     pub async fn merge_pdfs(
         &self,
         inputs: Vec<PathBuf>,
@@ -1675,7 +1797,6 @@ impl DownloadEngine {
         .map_err(|e| e.into())
     }
 
-    /// Separa um PDF em um arquivo por página, numa subpasta. Retorna a subpasta.
     pub async fn split_pdf(
         &self,
         input: &Path,
@@ -1715,7 +1836,6 @@ impl DownloadEngine {
         .map_err(|e| e.into())
     }
 
-    /// Rotaciona todas as páginas de um PDF (90/180/270 graus).
     pub async fn rotate_pdf(
         &self,
         input: &Path,
@@ -1749,7 +1869,6 @@ impl DownloadEngine {
         .map_err(|e| e.into())
     }
 
-    /// Reordena as páginas de um PDF conforme uma ordem (ex.: "3,1,2" ou "2-5,1").
     pub async fn reorder_pdf(
         &self,
         input: &Path,
@@ -1780,8 +1899,6 @@ impl DownloadEngine {
         .map_err(|e| e.into())
     }
 
-    /// Comprime um PDF rasterizando cada página a um DPI menor (bom p/ escaneados;
-    /// o texto vira imagem). Retorna o caminho do PDF gerado.
     pub async fn compress_pdf(
         &self,
         input: &Path,
@@ -1851,7 +1968,6 @@ impl DownloadEngine {
         Ok(out_ret)
     }
 
-    /// Versões/estado das dependências (yt-dlp, ffmpeg, pdfium, whisper).
     pub async fn dependency_status(&self) -> Vec<(String, String)> {
         async fn version(cmd_path: &Path, args: &[&str]) -> Option<String> {
             let mut cmd = tokio::process::Command::new(cmd_path);
@@ -1863,7 +1979,6 @@ impl DownloadEngine {
             s.lines().next().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
         }
 
-        // Existe o arquivo mas a versão falha = binário corrompido.
         let missing_or_corrupt = |path: &Path| -> String {
             if path.exists() {
                 "⚠ corrompido".to_string()
@@ -1959,7 +2074,6 @@ impl DownloadEngine {
         Ok(out_ret)
     }
 
-    /// Junta várias imagens num único PDF (uma página por imagem).
     pub async fn images_to_pdf_multi(
         &self,
         inputs: Vec<PathBuf>,
@@ -1994,7 +2108,6 @@ impl DownloadEngine {
                 ))
             };
 
-            // Primeira imagem cria o documento; as demais viram páginas adicionais.
             let (first_xobj, fw, fh) = make_xobject(&inputs[0])?;
             let (doc, page, layer) = PdfDocument::new(
                 "Lumen Converter",
@@ -2039,7 +2152,6 @@ impl DownloadEngine {
         Ok(out_ret)
     }
 
-    /// Extrai o texto de um PDF para um único arquivo .txt (PDFs com texto real).
     async fn pdf_to_text(
         &self,
         input: &Path,
@@ -2079,7 +2191,6 @@ impl DownloadEngine {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
 
-        // GIF: usa filtro com paleta para boa qualidade e tamanho razoável.
         let is_gif = output
             .extension()
             .map(|e| e.eq_ignore_ascii_case("gif"))
@@ -2104,7 +2215,6 @@ impl DownloadEngine {
 
         cmd.arg("-y").arg("-i").arg(input).arg("-map_metadata").arg("0");
 
-        // Presets de vídeo (compressão/escala).
         match preset {
             "compress" => {
                 cmd.arg("-c:v").arg("libx264").arg("-crf").arg("28")
@@ -2122,7 +2232,6 @@ impl DownloadEngine {
                 cmd.arg("-vf").arg("scale=-2:480").arg("-c:v").arg("libx264")
                     .arg("-crf").arg("24").arg("-c:a").arg("aac").arg("-b:a").arg("128k");
             }
-            // Ajuste manual: "manual:ALTURA:FPS:BITRATE_VIDEO:BITRATE_AUDIO" (campos vazios = manter).
             p if p.starts_with("manual:") => {
                 let parts: Vec<&str> = p.splitn(5, ':').collect();
                 let g = |i: usize| parts.get(i).map(|s| s.trim()).filter(|s| !s.is_empty());
@@ -2160,7 +2269,6 @@ impl DownloadEngine {
     }
 }
 
-/// Opções de um download via yt-dlp.
 #[derive(Clone)]
 pub struct DownloadOptions {
     pub is_audio: bool,
@@ -2172,6 +2280,11 @@ pub struct DownloadOptions {
     pub rate_limit: Option<String>,
     pub concurrent_fragments: u32,
     pub live_from_start: bool,
+    /// Gravação de live: usa contêiner MPEG-TS (robusto a interrupção) para o
+    /// arquivo sobreviver a uma parada forçada e poder ser remuxado.
+    pub is_live: bool,
+    /// Sinaliza uma parada graciosa de gravação de live (finaliza o que já baixou).
+    pub stop: Option<Arc<AtomicBool>>,
 }
 
 impl Default for DownloadOptions {
@@ -2186,23 +2299,22 @@ impl Default for DownloadOptions {
             rate_limit: None,
             concurrent_fragments: 4,
             live_from_start: false,
+            is_live: false,
+            stop: None,
         }
     }
 }
 
-/// Valida estritamente uma URL (http/https) — usado para sugestões do clipboard.
 pub fn is_valid_url(url: &str) -> bool {
     let u = url.trim();
     u.starts_with("http://") || u.starts_with("https://")
 }
 
-/// Validação leniente: parece um link? (aceita domínios sem esquema, que o yt-dlp resolve).
 pub fn looks_like_url(url: &str) -> bool {
     let u = url.trim();
     !u.is_empty() && !u.contains(char::is_whitespace) && u.contains('.')
 }
 
-/// Traduz erros crus do yt-dlp/ffmpeg em mensagens amigáveis.
 pub fn friendly_error(stderr: &str) -> String {
     let low = stderr.to_lowercase();
     let known = if low.contains("private video") || low.contains("sign in to confirm") {
@@ -2243,7 +2355,6 @@ pub fn friendly_error(stderr: &str) -> String {
     }
 }
 
-/// Remove arquivos parciais/temporários de um download (por radical).
 pub fn cleanup_partials(folder: &Path, stem: &str) {
     if let Ok(entries) = std::fs::read_dir(folder) {
         for entry in entries.flatten() {
@@ -2261,7 +2372,6 @@ pub fn cleanup_partials(folder: &Path, stem: &str) {
     }
 }
 
-/// Limpa restos de downloads anteriores numa pasta (na inicialização).
 pub fn cleanup_temp_dir(folder: &Path) {
     if let Ok(entries) = std::fs::read_dir(folder) {
         for entry in entries.flatten() {
@@ -2284,7 +2394,6 @@ pub fn cleanup_temp_dir(folder: &Path) {
     }
 }
 
-/// Metadados a gravar num arquivo de áudio.
 #[derive(Default)]
 pub struct AudioMeta {
     pub title: Option<String>,
@@ -2292,7 +2401,6 @@ pub struct AudioMeta {
     pub album: Option<String>,
 }
 
-/// Miniatura já decodificada em RGBA, pronta para virar textura no egui.
 #[derive(Clone)]
 pub struct ThumbImage {
     pub width: usize,
@@ -2300,7 +2408,6 @@ pub struct ThumbImage {
     pub rgba: Vec<u8>,
 }
 
-/// Informações de pré-visualização exibidas antes do download.
 #[derive(Clone, Default)]
 pub struct VideoPreview {
     pub title: String,
@@ -2310,9 +2417,9 @@ pub struct VideoPreview {
     pub est_size_video: Option<i64>,
     pub est_size_audio: Option<i64>,
     pub thumbnail: Option<ThumbImage>,
+    pub is_live: bool,
 }
 
-/// Baixa e decodifica uma miniatura (best-effort), reduzindo para no máx. 360px.
 pub async fn download_thumbnail(url: &str) -> Option<ThumbImage> {
     let bytes = reqwest::get(url).await.ok()?.bytes().await.ok()?;
     let img = image::load_from_memory(&bytes).ok()?;
@@ -2334,7 +2441,6 @@ pub async fn download_thumbnail(url: &str) -> Option<ThumbImage> {
     })
 }
 
-/// Formata uma duração em segundos como `h:mm:ss` ou `m:ss`.
 pub fn format_duration(secs: i64) -> String {
     let secs = secs.max(0);
     let h = secs / 3600;
@@ -2347,7 +2453,6 @@ pub fn format_duration(secs: i64) -> String {
     }
 }
 
-/// Formata um tamanho em bytes em algo legível (KB/MB/GB).
 pub fn format_size(bytes: i64) -> String {
     let b = bytes as f64;
     const KB: f64 = 1024.0;
@@ -2364,8 +2469,6 @@ pub fn format_size(bytes: i64) -> String {
     }
 }
 
-/// Extrai a porcentagem (0.0..=1.0) de uma linha de progresso do yt-dlp.
-/// Ex.: "[download]  42.3% of 10.00MiB at ..." → 0.423
 fn parse_ytdlp_percent(line: &str) -> Option<f64> {
     let l = line.trim_start();
     if !l.starts_with("[download]") {
@@ -2379,17 +2482,13 @@ fn parse_ytdlp_percent(line: &str) -> Option<f64> {
         .map(|v| (v / 100.0).clamp(0.0, 1.0))
 }
 
-/// Extrai a velocidade (bytes/s) de uma linha de progresso do yt-dlp.
-/// Ex.: "[download]  12.3% of 10.00MiB at  1.23MiB/s ETA 00:07" → 1289748.0
 fn parse_ytdlp_speed(line: &str) -> Option<f64> {
     let l = line.trim_start();
     if !l.starts_with("[download]") {
         return None;
     }
-    // Procura o token que termina em "/s" (ex.: "1.23MiB/s").
     let tok = l.split_whitespace().find(|t| t.ends_with("/s"))?;
     let body = tok.trim_end_matches("/s");
-    // Separa número do sufixo de unidade.
     let split = body.find(|c: char| c.is_alphabetic()).unwrap_or(body.len());
     let (num, unit) = body.split_at(split);
     let value: f64 = num.parse().ok()?;
@@ -2406,7 +2505,6 @@ fn parse_ytdlp_speed(line: &str) -> Option<f64> {
     Some(value * mult)
 }
 
-/// Extrai o ETA (segundos) de uma linha de progresso do yt-dlp ("ETA 00:07").
 fn parse_ytdlp_eta(line: &str) -> Option<u64> {
     let l = line.trim_start();
     if !l.starts_with("[download]") {
@@ -2427,13 +2525,49 @@ fn parse_ytdlp_eta(line: &str) -> Option<u64> {
     Some(secs)
 }
 
-/// Heurística simples: a URL é do YouTube?
+/// Extrai o total baixado de uma linha do yt-dlp (ex.: "[download]  30.56MiB at ...").
+fn parse_ytdlp_size(line: &str) -> Option<u64> {
+    let l = line.trim_start();
+    if !l.starts_with("[download]") {
+        return None;
+    }
+    for tok in l.split_whitespace() {
+        let unit_mul = if let Some(n) = tok.strip_suffix("GiB") {
+            Some((n, 1024.0 * 1024.0 * 1024.0))
+        } else if let Some(n) = tok.strip_suffix("MiB") {
+            Some((n, 1024.0 * 1024.0))
+        } else if let Some(n) = tok.strip_suffix("KiB") {
+            Some((n, 1024.0))
+        } else {
+            None
+        };
+        if let Some((num, mul)) = unit_mul {
+            if let Ok(v) = num.parse::<f64>() {
+                return Some((v * mul) as u64);
+            }
+        }
+    }
+    None
+}
+
+/// Aguarda até a flag de parada ser acionada; se não houver flag, nunca resolve.
+async fn wait_for_stop(stop: &Option<Arc<AtomicBool>>) {
+    match stop {
+        Some(s) => loop {
+            if s.load(Ordering::Relaxed) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        },
+        None => std::future::pending::<()>().await,
+    }
+}
+
 fn is_youtube(url: &str) -> bool {
     let u = url.to_lowercase();
     u.contains("youtube.com") || u.contains("youtu.be")
 }
 
-/// Extrai a última linha útil do stderr do yt-dlp como mensagem de erro.
 fn ytdlp_error(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     let last = text
@@ -2444,7 +2578,6 @@ fn ytdlp_error(stderr: &[u8]) -> String {
     format!("yt-dlp: {}", last)
 }
 
-/// Encontra o arquivo de mídia gerado (ignora legendas e parciais).
 fn find_output(folder: &Path, stem: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(folder).ok()?;
     for entry in entries.flatten() {
@@ -2464,7 +2597,6 @@ fn find_output(folder: &Path, stem: &str) -> Option<PathBuf> {
     None
 }
 
-/// Estrutura tolerante para o JSON do yt-dlp (apenas campos usados na preview).
 #[derive(serde::Deserialize)]
 struct YtJson {
     title: Option<String>,
@@ -2472,6 +2604,10 @@ struct YtJson {
     uploader: Option<String>,
     channel: Option<String>,
     thumbnail: Option<String>,
+    #[serde(default)]
+    is_live: bool,
+    #[serde(default)]
+    live_status: Option<String>,
     #[serde(default)]
     formats: Vec<YtFormat>,
 }
@@ -2490,7 +2626,6 @@ struct YtFormat {
     format_note: Option<String>,
 }
 
-/// Uma linha do inspetor de formatos.
 #[derive(Clone)]
 pub struct FormatRow {
     pub id: String,
@@ -2498,12 +2633,11 @@ pub struct FormatRow {
     pub resolution: String,
     pub fps: String,
     pub codec: String,
-    pub kind: String, // "Vídeo+Áudio" | "Vídeo" | "Áudio"
+    pub kind: String,
     pub bitrate: String,
     pub size: Option<i64>,
 }
 
-/// Subpasta de organização automática conforme a preferência do usuário.
 pub fn organize_subfolder(organize_by: &str, media_type: &str, channel: &str) -> Option<String> {
     match organize_by {
         "type" => Some(
@@ -2528,7 +2662,6 @@ pub fn organize_subfolder(organize_by: &str, media_type: &str, channel: &str) ->
     }
 }
 
-/// Indica se a extensão alvo é um formato de áudio (sem vídeo).
 pub fn is_audio_format(format: &str) -> bool {
     matches!(
         format,
@@ -2536,7 +2669,6 @@ pub fn is_audio_format(format: &str) -> bool {
     )
 }
 
-/// Categoria de um arquivo, usada para decidir quais formatos de saída oferecer.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileCategory {
     Audio,
@@ -2547,7 +2679,6 @@ pub enum FileCategory {
     Unknown,
 }
 
-/// Determina a categoria de um arquivo a partir da sua extensão.
 pub fn categorize(path: &Path) -> FileCategory {
     let ext = path
         .extension()
@@ -2569,17 +2700,12 @@ pub fn categorize(path: &Path) -> FileCategory {
     }
 }
 
-/// Procura o executável do whisper.cpp dentro de uma pasta (recursivo, 3 níveis).
-/// Prioriza `whisper-cli` — `main` é o stub DEPRECIADO do whisper.cpp e só
-/// imprime um aviso e sai.
 fn find_whisper_exe(dir: &Path) -> Option<PathBuf> {
     let names: &[&str] = if cfg!(windows) {
         &["whisper-cli.exe", "main.exe"]
     } else {
         &["whisper-cli", "main"]
     };
-    // Busca cada nome (em ordem de preferência) por toda a árvore antes de
-    // cair para o próximo — assim o whisper-cli sempre vence o main depreciado.
     for name in names {
         if let Some(found) = find_named(dir, name, 3) {
             return Some(found);
@@ -2611,25 +2737,492 @@ fn find_named(dir: &Path, target: &str, depth: u32) -> Option<PathBuf> {
     None
 }
 
-/// Caminho do executável do LibreOffice (instalado), com fallback para o PATH.
-fn soffice_path() -> PathBuf {
+pub struct EngineStatus {
+    pub msoffice: bool,
+    pub msoffice_detail: String,
+    pub libreoffice: bool,
+}
+
+static ENGINE_STATUS: OnceLock<EngineStatus> = OnceLock::new();
+
+/// Detecta (uma vez por sessão) os motores externos disponíveis.
+pub fn engine_status() -> &'static EngineStatus {
+    ENGINE_STATUS.get_or_init(|| {
+        let mut apps: Vec<&str> = Vec::new();
+        if msoffice_exe("WINWORD.EXE").is_some() {
+            apps.push("Word");
+        }
+        if msoffice_exe("EXCEL.EXE").is_some() {
+            apps.push("Excel");
+        }
+        if msoffice_exe("POWERPNT.EXE").is_some() {
+            apps.push("PowerPoint");
+        }
+        EngineStatus {
+            msoffice: !apps.is_empty(),
+            msoffice_detail: apps.join(", "),
+            libreoffice: libreoffice_path().is_some(),
+        }
+    })
+}
+
+/// No modo Automático, escolhe o motor de maior fidelidade disponível.
+fn auto_pick_engine() -> ConvertEngine {
+    let st = engine_status();
+    if st.msoffice {
+        ConvertEngine::MsOffice
+    } else if st.libreoffice {
+        ConvertEngine::LibreOffice
+    } else {
+        ConvertEngine::Rust
+    }
+}
+
+pub fn libreoffice_path() -> Option<PathBuf> {
     let candidates = [
         r"C:\Program Files\LibreOffice\program\soffice.exe",
         r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
         "/usr/bin/soffice",
         "/Applications/LibreOffice.app/Contents/MacOS/soffice",
     ];
-    for c in candidates {
-        if Path::new(c).exists() {
-            return PathBuf::from(c);
-        }
-    }
-    PathBuf::from("soffice")
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
 }
 
-/// Formatos de saída disponíveis para cada categoria de arquivo.
-/// Vídeo inclui também formatos de áudio para permitir extrair o áudio.
-/// Imagem inclui "pdf" (imagem → PDF) e documentos PDF geram imagens.
+fn msoffice_exe(name: &str) -> Option<PathBuf> {
+    let roots = [
+        r"C:\Program Files\Microsoft Office",
+        r"C:\Program Files (x86)\Microsoft Office",
+    ];
+    for r in roots {
+        let root = Path::new(r);
+        if root.exists() {
+            if let Some(found) = find_named(root, name, 4) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn msoffice_to_pdf(input: &Path, out: &Path) -> Result<(), String> {
+    let ext = input
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let inp = input.to_string_lossy().replace('\'', "''");
+    let outp = out.to_string_lossy().replace('\'', "''");
+
+    let script = match ext.as_str() {
+        "doc" | "docx" | "odt" | "rtf" | "txt" => format!(
+            "$w = New-Object -ComObject Word.Application; $w.Visible = $false; \
+             try {{ $d = $w.Documents.Open('{inp}'); $d.SaveAs([ref]'{outp}', [ref]17); $d.Close($false) }} \
+             finally {{ $w.Quit() }}",
+        ),
+        "xls" | "xlsx" | "ods" | "csv" => format!(
+            "$x = New-Object -ComObject Excel.Application; $x.Visible = $false; $x.DisplayAlerts = $false; \
+             try {{ $wb = $x.Workbooks.Open('{inp}'); $wb.ExportAsFixedFormat(0, '{outp}'); $wb.Close($false) }} \
+             finally {{ $x.Quit() }}",
+        ),
+        "ppt" | "pptx" | "odp" => format!(
+            "$p = New-Object -ComObject PowerPoint.Application; \
+             try {{ $pr = $p.Presentations.Open('{inp}', $true, $false, $false); $pr.SaveAs('{outp}', 32); $pr.Close() }} \
+             finally {{ $p.Quit() }}",
+        ),
+        other => {
+            return Err(format!(
+                "MS Office não suporta \"{}\" para PDF aqui.",
+                other
+            ))
+        }
+    };
+
+    use std::os::windows::process::CommandExt;
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if out.exists() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!(
+        "MS Office não gerou o PDF. {}",
+        stderr.trim()
+    ))
+}
+
+fn office_extract_text(path: &Path) -> Result<String, String> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "txt" | "md" | "markdown" | "log" => {
+            std::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).map_err(|e| e.to_string())
+        }
+        "csv" => std::fs::read(path)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .map_err(|e| e.to_string()),
+        "html" | "htm" => {
+            let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+            Ok(strip_markup(&String::from_utf8_lossy(&raw)))
+        }
+        "rtf" => {
+            let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+            Ok(rtf_to_text(&String::from_utf8_lossy(&raw)))
+        }
+        "docx" => office_xml_to_text(&read_zip_entry(path, "word/document.xml")?),
+        "odt" | "odp" => office_xml_to_text(&read_zip_entry(path, "content.xml")?),
+        "pptx" => {
+            let slides = read_zip_entries(path, "ppt/slides/slide", ".xml")?;
+            office_xml_to_text(&slides)
+        }
+        "epub" => {
+            let pages = read_zip_entries_by_suffix(path, &[".xhtml", ".html", ".htm"])?;
+            Ok(strip_markup(&pages))
+        }
+        "xlsx" | "xls" | "ods" => spreadsheet_to_text(path),
+        other => Err(format!(
+            "Formato \"{}\" não é suportado na conversão nativa.",
+            other
+        )),
+    }
+}
+
+fn read_zip_entry(path: &Path, name: &str) -> Result<String, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut entry = archive
+        .by_name(name)
+        .map_err(|_| format!("entrada \"{}\" não encontrada no arquivo", name))?;
+    let mut buf = String::new();
+    entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+fn read_zip_entries(path: &Path, prefix: &str, suffix: &str) -> Result<String, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut names: Vec<String> = (0..archive.len())
+        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+        .filter(|n| n.starts_with(prefix) && n.ends_with(suffix))
+        .collect();
+    names.sort();
+    let mut out = String::new();
+    for name in names {
+        if let Ok(mut entry) = archive.by_name(&name) {
+            let mut buf = String::new();
+            if entry.read_to_string(&mut buf).is_ok() {
+                out.push_str(&buf);
+                out.push('\n');
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn read_zip_entries_by_suffix(path: &Path, suffixes: &[&str]) -> Result<String, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut names: Vec<String> = (0..archive.len())
+        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+        .filter(|n| suffixes.iter().any(|s| n.to_lowercase().ends_with(s)))
+        .collect();
+    names.sort();
+    let mut out = String::new();
+    for name in names {
+        if let Ok(mut entry) = archive.by_name(&name) {
+            let mut buf = String::new();
+            if entry.read_to_string(&mut buf).is_ok() {
+                out.push_str(&buf);
+                out.push('\n');
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn spreadsheet_to_text(path: &Path) -> Result<String, String> {
+    use calamine::{open_workbook_auto, Data, Reader};
+    let mut wb = open_workbook_auto(path).map_err(|e| e.to_string())?;
+    let names: Vec<String> = wb.sheet_names().to_vec();
+    let mut out = String::new();
+    for name in names {
+        if let Ok(range) = wb.worksheet_range(&name) {
+            if range.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("# {}\n", name));
+            for row in range.rows() {
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|c| match c {
+                        Data::Empty => String::new(),
+                        Data::String(s) => s.clone(),
+                        Data::Float(f) => format!("{}", f),
+                        Data::Int(i) => format!("{}", i),
+                        Data::Bool(b) => format!("{}", b),
+                        Data::DateTime(d) => format!("{}", d),
+                        Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
+                        Data::Error(e) => format!("{:?}", e),
+                    })
+                    .collect();
+                out.push_str(&cells.join(" | "));
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+fn office_xml_to_text(xml: &str) -> Result<String, String> {
+    let mut s = xml.to_string();
+    for para in ["</w:p>", "</text:p>", "</text:h>", "</a:p>", "</p>"] {
+        s = s.replace(para, "\n");
+    }
+    for tab in ["<w:tab/>", "<w:tab />", "<text:tab/>", "<text:tab/>"] {
+        s = s.replace(tab, "\t");
+    }
+    for br in ["<w:br/>", "<w:br />", "<text:line-break/>", "<br/>", "<br />", "<br>"] {
+        s = s.replace(br, "\n");
+    }
+    Ok(unescape_entities(&strip_tags(&s)))
+}
+
+fn strip_markup(html: &str) -> String {
+    let mut s = html.to_string();
+    for br in [
+        "</p>", "</div>", "</li>", "</tr>", "</h1>", "</h2>", "</h3>", "</h4>", "<br/>", "<br />",
+        "<br>",
+    ] {
+        s = s.replace(br, "\n");
+    }
+    let no_tags = strip_tags(&s);
+    let text = unescape_entities(&no_tags);
+    let mut blank = 0;
+    let mut out = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.trim().is_empty() {
+            blank += 1;
+            if blank > 1 {
+                continue;
+            }
+        } else {
+            blank = 0;
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+    }
+    out
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn unescape_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '&' {
+            out.push(c);
+            continue;
+        }
+        let mut ent = String::new();
+        while let Some(&nc) = chars.peek() {
+            if nc == ';' {
+                chars.next();
+                break;
+            }
+            if ent.len() > 10 {
+                break;
+            }
+            ent.push(nc);
+            chars.next();
+        }
+        match ent.as_str() {
+            "amp" => out.push('&'),
+            "lt" => out.push('<'),
+            "gt" => out.push('>'),
+            "quot" => out.push('"'),
+            "apos" => out.push('\''),
+            "nbsp" => out.push(' '),
+            _ => {
+                if let Some(rest) = ent.strip_prefix('#') {
+                    let code = if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X')) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        rest.parse::<u32>().ok()
+                    };
+                    if let Some(ch) = code.and_then(char::from_u32) {
+                        out.push(ch);
+                    }
+                } else {
+                    out.push('&');
+                    out.push_str(&ent);
+                    out.push(';');
+                }
+            }
+        }
+    }
+    out
+}
+
+fn rtf_to_text(rtf: &str) -> String {
+    let mut out = String::new();
+    let mut chars = rtf.chars().peekable();
+    let mut depth = 0i32;
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = (depth - 1).max(0),
+            '\\' => {
+                let mut word = String::new();
+                while let Some(&nc) = chars.peek() {
+                    if nc.is_ascii_alphabetic() {
+                        word.push(nc);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let mut num = String::new();
+                while let Some(&nc) = chars.peek() {
+                    if nc.is_ascii_digit() || (num.is_empty() && nc == '-') {
+                        num.push(nc);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(&' ') = chars.peek() {
+                    chars.next();
+                }
+                match word.as_str() {
+                    "par" | "line" => out.push('\n'),
+                    "tab" => out.push('\t'),
+                    _ => {}
+                }
+            }
+            _ if depth >= 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn render_text_pdf(text: &str, out: &Path, title: &str) -> Result<(), String> {
+    const PAGE_W: f32 = 210.0;
+    const PAGE_H: f32 = 297.0;
+    const MARGIN: f32 = 20.0;
+    const FONT_SIZE: f32 = 11.0;
+    const LINE_H: f32 = 5.0;
+    const MAX_CHARS: usize = 92;
+
+    let (doc, page1, layer1) =
+        PdfDocument::new(title, Mm(PAGE_W), Mm(PAGE_H), "Texto");
+    let font = doc
+        .add_builtin_font(BuiltinFont::Helvetica)
+        .map_err(|e| e.to_string())?;
+    let mut layer = doc.get_page(page1).get_layer(layer1);
+    let mut y = PAGE_H - MARGIN;
+
+    let emit = |layer: &mut printpdf::PdfLayerReference,
+                y: &mut f32,
+                doc: &printpdf::PdfDocumentReference,
+                line: &str| {
+        if *y < MARGIN {
+            let (p, l) = doc.add_page(Mm(PAGE_W), Mm(PAGE_H), "Texto");
+            *layer = doc.get_page(p).get_layer(l);
+            *y = PAGE_H - MARGIN;
+        }
+        layer.use_text(line, FONT_SIZE, Mm(MARGIN), Mm(*y), &font);
+        *y -= LINE_H;
+    };
+
+    for raw_line in text.replace('\t', "    ").lines() {
+        let line = raw_line.trim_end();
+        if line.is_empty() {
+            y -= LINE_H;
+            if y < MARGIN {
+                let (p, l) = doc.add_page(Mm(PAGE_W), Mm(PAGE_H), "Texto");
+                layer = doc.get_page(p).get_layer(l);
+                y = PAGE_H - MARGIN;
+            }
+            continue;
+        }
+        for wrapped in wrap_line(line, MAX_CHARS) {
+            emit(&mut layer, &mut y, &doc, &wrapped);
+        }
+    }
+
+    let file = std::fs::File::create(out).map_err(|e| e.to_string())?;
+    let mut writer = std::io::BufWriter::new(file);
+    doc.save(&mut writer).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn wrap_line(line: &str, max: usize) -> Vec<String> {
+    if line.chars().count() <= max {
+        return vec![line.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for word in line.split(' ') {
+        if word.chars().count() > max {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            let mut chunk = String::new();
+            for c in word.chars() {
+                chunk.push(c);
+                if chunk.chars().count() >= max {
+                    out.push(std::mem::take(&mut chunk));
+                }
+            }
+            if !chunk.is_empty() {
+                current = chunk;
+            }
+            continue;
+        }
+        let extra = if current.is_empty() { 0 } else { 1 };
+        if current.chars().count() + extra + word.chars().count() > max {
+            out.push(std::mem::take(&mut current));
+            current.push_str(word);
+        } else {
+            if extra == 1 {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 pub fn output_formats(category: FileCategory) -> Vec<&'static str> {
     match category {
         FileCategory::Audio => vec!["mp3", "m4a", "aac", "opus", "ogg", "wav", "flac"],
@@ -2638,7 +3231,7 @@ pub fn output_formats(category: FileCategory) -> Vec<&'static str> {
         ],
         FileCategory::Image => vec!["jpg", "png", "webp", "bmp", "tiff", "gif", "pdf"],
         FileCategory::Document => vec!["png", "jpg", "txt"],
-        FileCategory::Office => vec!["pdf", "docx", "odt", "txt"],
+        FileCategory::Office => vec!["pdf", "txt"],
         FileCategory::Unknown => vec![],
     }
 }

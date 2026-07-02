@@ -3,9 +3,18 @@ use egui::Color32;
 use crate::app::{App, DownloadPhase, MediaType, Tab};
 use crate::ui::theme;
 
-
 pub fn render(app: &mut App, ctx: &egui::Context) {
+    // Modo Games: interface própria (compacta, minimalista, focada no Início com
+    // atalhos rápidos), mantendo acesso a todos os recursos. Sem a barra lateral.
+    if app.gamepad_mode {
+        render_mini_player(app, ctx);
+        crate::ui::gamepad_mode::render(app, ctx);
+        render_overlays(app, ctx);
+        return;
+    }
+
     render_sidebar(app, ctx);
+    render_mini_player(app, ctx);
 
     egui::CentralPanel::default()
         .frame(
@@ -20,7 +29,6 @@ pub fn render(app: &mut App, ctx: &egui::Context) {
         )
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                // Centraliza o conteúdo limitando a uma largura máxima em telas largas.
                 const MAX_W: f32 = 1080.0;
                 let pad = ((ui.available_width() - MAX_W) / 2.0).max(0.0);
                 egui::Frame::none()
@@ -37,6 +45,10 @@ pub fn render(app: &mut App, ctx: &egui::Context) {
             });
         });
 
+    render_overlays(app, ctx);
+}
+
+fn render_overlays(app: &mut App, ctx: &egui::Context) {
     render_modal(app, ctx);
     render_toasts(app, ctx);
     render_inspector(app, ctx);
@@ -51,7 +63,6 @@ pub fn render(app: &mut App, ctx: &egui::Context) {
     render_detached(app, ctx);
 }
 
-/// Janela de boas-vindas (primeira execução).
 fn render_onboarding(app: &mut App, ctx: &egui::Context) {
     if app.config.onboarded {
         return;
@@ -63,7 +74,6 @@ fn render_onboarding(app: &mut App, ctx: &egui::Context) {
         .resizable(false)
         .show(ctx, |ui| {
             ui.set_width(440.0);
-            // Logo da marca no topo das boas-vindas.
             if app.brand_texture.is_none() {
                 app.brand_texture = crate::app::load_brand_texture(ui.ctx());
             }
@@ -117,7 +127,6 @@ fn render_onboarding(app: &mut App, ctx: &egui::Context) {
         });
 }
 
-/// Janela com a lista de arquivos órfãos (no disco, fora do histórico).
 fn render_orphans(app: &mut App, ctx: &egui::Context) {
     let Some(list) = app.orphans.clone() else {
         return;
@@ -183,7 +192,6 @@ fn render_orphans(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// Diálogo de confirmação ao limpar o histórico.
 fn render_confirm_clear(app: &mut App, ctx: &egui::Context) {
     let Some(mt) = app.pending_clear.clone() else {
         return;
@@ -222,7 +230,98 @@ fn render_confirm_clear(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// Despacha o conteúdo de uma aba (reusado pela janela principal e pelas destacadas).
+fn fmt_time(d: std::time::Duration) -> String {
+    let total = d.as_secs();
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+fn render_mini_player(app: &mut App, ctx: &egui::Context) {
+    if !app.mini.is_active() {
+        return;
+    }
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
+    egui::TopBottomPanel::bottom("mini_player")
+        .frame(
+            egui::Frame::none()
+                .fill(theme::bg_sidebar())
+                .stroke(egui::Stroke::new(1.0, theme::border()))
+                .inner_margin(egui::Margin::symmetric(16.0, 8.0)),
+        )
+        .show(ctx, |ui| {
+            let mut stop = false;
+            ui.horizontal(|ui| {
+                let icon = if app.mini.playing { "⏸" } else { "▶" };
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(icon).size(15.0).color(egui::Color32::WHITE),
+                        )
+                        .fill(theme::accent())
+                        .min_size(egui::vec2(38.0, 32.0)),
+                    )
+                    .on_hover_text(if pt { "Tocar/pausar" } else { "Play/pause" })
+                    .clicked()
+                {
+                    app.mini.toggle();
+                }
+                if ui
+                    .add(theme::ghost_button("⏹"))
+                    .on_hover_text(if pt { "Parar" } else { "Stop" })
+                    .clicked()
+                {
+                    stop = true;
+                }
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("🎧  {}", app.mini.title))
+                            .color(theme::text())
+                            .strong(),
+                    );
+                    let time = format!(
+                        "{} / {}",
+                        fmt_time(app.mini.elapsed()),
+                        app.mini
+                            .duration
+                            .map(fmt_time)
+                            .unwrap_or_else(|| "--:--".to_string()),
+                    );
+                    ui.label(
+                        egui::RichText::new(time)
+                            .color(theme::text_muted())
+                            .size(11.0),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut v = app.mini.volume;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut v, 0.0..=1.0)
+                                .show_value(false)
+                                .handle_shape(egui::style::HandleShape::Circle),
+                        )
+                        .changed()
+                    {
+                        app.mini.set_volume(v);
+                    }
+                    ui.label(egui::RichText::new("🔊").color(theme::text_muted()));
+                });
+            });
+            if let Some(dur) = app.mini.duration {
+                let frac = (app.mini.elapsed().as_secs_f32() / dur.as_secs_f32().max(0.01))
+                    .clamp(0.0, 1.0);
+                ui.add(egui::ProgressBar::new(frac).desired_height(4.0));
+            }
+            if stop {
+                app.mini.stop();
+            }
+        });
+    // Atualiza o tempo enquanto toca.
+    if app.mini.playing {
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
+}
+
 pub fn render_tab_content(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui, tab: Tab) {
     match tab {
         Tab::Home => crate::ui::home_tab::render(app, ctx, ui),
@@ -240,7 +339,6 @@ pub fn render_tab_content(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui,
     }
 }
 
-/// Título curto de uma aba (para a barra de título da janela destacada).
 fn tab_title(tab: Tab, s: &crate::ui::i18n::Strings) -> &'static str {
     match tab {
         Tab::Home => s.nav_home,
@@ -258,7 +356,6 @@ fn tab_title(tab: Tab, s: &crate::ui::i18n::Strings) -> &'static str {
     }
 }
 
-/// Renderiza as abas destacadas em janelas próprias (multi-janela).
 fn render_detached(app: &mut App, ctx: &egui::Context) {
     let s = crate::ui::i18n::s(app.config.lang);
     let tabs = app.detached.clone();
@@ -294,7 +391,6 @@ fn render_detached(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// Diálogo de categorias/tags de um item do histórico.
 fn render_tags_dialog(app: &mut App, ctx: &egui::Context) {
     if app.history_tag_edit.is_none() {
         return;
@@ -345,7 +441,6 @@ fn render_tags_dialog(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// Janela do editor de tags ID3 (+ detectar BPM).
 fn render_tag_editor(app: &mut App, ctx: &egui::Context) {
     if app.tag_editor.is_none() {
         return;
@@ -428,7 +523,6 @@ fn render_tag_editor(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// Paleta de comandos (Ctrl+K) e caixa de ferramentas rápida.
 fn render_command_palette(app: &mut App, ctx: &egui::Context) {
     if !app.cmd_palette_open {
         return;
@@ -485,7 +579,6 @@ fn render_command_palette(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// Janela com o QR code do link de origem.
 fn render_qr_window(app: &mut App, ctx: &egui::Context) {
     let Some((url, tex)) = app.qr_window.clone() else {
         return;
@@ -529,7 +622,6 @@ fn render_qr_window(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// Janela genérica de informação (ex.: metadados de um arquivo).
 fn render_info_window(app: &mut App, ctx: &egui::Context) {
     let content = app.info_window.lock().unwrap().clone();
     let Some((title, body)) = content else {
@@ -555,7 +647,6 @@ fn render_info_window(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// Janela do inspetor de formatos (resolução, codec, bitrate, tamanho).
 fn render_inspector(app: &mut App, ctx: &egui::Context) {
     let (open, loading, rows, error) = {
         let i = app.inspector.lock().unwrap();
@@ -630,7 +721,6 @@ fn render_inspector(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// Notificações in-app, empilhadas no canto inferior direito.
 fn render_toasts(app: &mut App, ctx: &egui::Context) {
     if app.toasts.is_empty() {
         return;
@@ -692,7 +782,6 @@ fn render_sidebar(app: &mut App, ctx: &egui::Context) {
                 }),
         )
         .show(ctx, |ui| {
-            // Logo da marca (logo + nome), carregado uma vez.
             if app.brand_texture.is_none() {
                 app.brand_texture = crate::app::load_brand_texture(ui.ctx());
             }
@@ -703,22 +792,21 @@ fn render_sidebar(app: &mut App, ctx: &egui::Context) {
                 let w = h * tw as f32 / th.max(1) as f32;
                 ui.add(egui::Image::from_texture((tex.id(), egui::vec2(w, h))));
             } else {
-                // Fallback textual se a imagem não carregar.
                 ui.label(egui::RichText::new("◆ Lumen").size(22.0).strong().color(theme::accent()));
             }
             ui.add_space(4.0);
-            // Ações rápidas: paleta de comandos (Ctrl+K) e destacar aba.
             ui.horizontal(|ui| {
-                if ui
-                    .add(egui::Button::new(egui::RichText::new("🧰").size(15.0)).fill(egui::Color32::TRANSPARENT))
-                    .on_hover_text("Ctrl+K")
-                    .clicked()
-                {
+                let icon_btn = |txt: &str| {
+                    egui::Button::new(egui::RichText::new(txt).size(15.0))
+                        .fill(egui::Color32::TRANSPARENT)
+                        .min_size(egui::vec2(30.0, 28.0))
+                };
+                if ui.add(icon_btn("🧰")).on_hover_text("Ctrl+K").clicked() {
                     app.cmd_palette_open = true;
                     app.cmd_query.clear();
                 }
                 if ui
-                    .add(egui::Button::new(egui::RichText::new("⧉").size(14.0)).fill(egui::Color32::TRANSPARENT))
+                    .add(icon_btn("⧉"))
                     .on_hover_text(if app.config.lang == crate::ui::i18n::Lang::Pt {
                         "Abrir aba em nova janela"
                     } else {
@@ -749,8 +837,6 @@ fn render_sidebar(app: &mut App, ctx: &egui::Context) {
                 ("⚙", s.nav_settings, Tab::Settings),
                 ("❓", s.nav_help, Tab::Help),
             ];
-            // Reserva espaço para o rodapé (armazenamento + crédito) com uma folga
-            // extra no fim, para não colar na borda/barra de tarefas.
             let footer_h = 150.0;
             let nav_h = (ui.available_height() - footer_h).max(120.0);
             egui::ScrollArea::vertical()
@@ -772,7 +858,6 @@ fn render_sidebar(app: &mut App, ctx: &egui::Context) {
         });
 }
 
-/// Widget de armazenamento estilo biblioteca do Xbox: anel de % usado + "X GB livre".
 fn storage_footer(ui: &mut egui::Ui, app: &App) {
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
     let (free, total) = disk_usage(&app.config.default_download_dir);
@@ -787,7 +872,6 @@ fn storage_footer(ui: &mut egui::Ui, app: &App) {
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::hover());
         let cy = rect.center().y;
 
-        // Texto à esquerda.
         ui.painter().text(
             egui::pos2(rect.min.x, cy - 8.0),
             egui::Align2::LEFT_CENTER,
@@ -808,7 +892,6 @@ fn storage_footer(ui: &mut egui::Ui, app: &App) {
             theme::text_muted(),
         );
 
-        // Anel de uso à direita.
         let used_frac = if total > 0 {
             ((total - free) as f32 / total as f32).clamp(0.0, 1.0)
         } else {
@@ -829,7 +912,6 @@ fn storage_footer(ui: &mut egui::Ui, app: &App) {
     });
 }
 
-/// Desenha um arco (fração 0..1) começando no topo, sentido horário.
 fn draw_arc(
     painter: &egui::Painter,
     center: egui::Pos2,
@@ -853,7 +935,6 @@ fn draw_arc(
     painter.add(egui::Shape::line(pts, egui::Stroke::new(width, color)));
 }
 
-/// Espaço (livre, total) do disco da pasta (ou do ancestral existente mais próximo).
 fn disk_usage(folder: &std::path::Path) -> (i64, i64) {
     let mut p = folder;
     loop {
@@ -869,11 +950,9 @@ fn disk_usage(folder: &std::path::Path) -> (i64, i64) {
     }
 }
 
-/// Rodapé de crédito clicável: "Lumen Connection" → site oficial.
 fn credit_footer(ui: &mut egui::Ui, pt: bool) {
     const URL: &str = "https://lumenconnection.com.br/";
 
-    // Rótulo pequeno acima do cartão.
     ui.label(
         egui::RichText::new(if pt { "CRÉDITO · CONHEÇA-NOS" } else { "CREDIT · GET TO KNOW US" })
             .size(9.0)
@@ -892,7 +971,6 @@ fn credit_footer(ui: &mut egui::Ui, pt: bool) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
-    // "Avatar" circular com o losango da marca.
     let cx = rect.min.x + 18.0;
     let cy = rect.center().y;
     ui.painter().circle_filled(egui::pos2(cx, cy), 13.0, theme::accent());
@@ -911,7 +989,6 @@ fn credit_footer(ui: &mut egui::Ui, pt: bool) {
         egui::FontId::proportional(14.0),
         theme::text(),
     );
-    // Convite com seta de link externo (acende no hover).
     let link_color = if hovered { theme::accent() } else { theme::text_muted() };
     ui.painter().text(
         egui::pos2(rect.min.x + 40.0, cy + 9.0),
@@ -933,7 +1010,6 @@ fn open_folder(path: &str) {
     }
 }
 
-/// Mini-gráfico (sparkline) da velocidade de download.
 fn sparkline(ui: &mut egui::Ui, data: &[f32]) {
     let w = ui.available_width().min(340.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 48.0), egui::Sense::hover());
@@ -957,7 +1033,6 @@ fn sparkline(ui: &mut egui::Ui, data: &[f32]) {
         .add(egui::Shape::line(pts, egui::Stroke::new(2.0, theme::accent())));
 }
 
-/// Mostra miniatura, canal, duração, resoluções, tamanho estimado e espaço livre.
 fn render_preview(
     ui: &mut egui::Ui,
     s: &crate::ui::i18n::Strings,
@@ -1028,7 +1103,6 @@ fn render_preview(
                 .color(theme::text_faint())
                 .size(12.0),
             );
-            // Aviso de pouco espaço (estimativa > livre, ou < 200 MB).
             let low = est.map(|e| free < e).unwrap_or(false) || free < 200 * 1024 * 1024;
             if low {
                 ui.label(
@@ -1041,7 +1115,6 @@ fn render_preview(
     });
 }
 
-/// Espaço livre no disco da pasta (ou do ancestral existente mais próximo).
 fn free_space(folder: &std::path::Path) -> Option<i64> {
     let mut p = folder;
     loop {
@@ -1075,11 +1148,15 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
     let max_height;
     let convert_preset;
     let live_from_start;
+    let is_live;
+    let live_bytes;
 
     {
         let op = app.operation.lock().unwrap();
         phase = op.phase.clone();
         progress = op.progress;
+        is_live = op.is_live;
+        live_bytes = op.live_bytes;
         preview = op.preview.clone();
         url = op.url.clone();
         title = op.title.clone();
@@ -1153,8 +1230,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
             let formats: Vec<&str> = match media_type {
                 MediaType::Music => vec!["mp3", "m4a", "opus", "flac"],
                 MediaType::Video => vec!["mp4", "mkv", "webm"],
-                // Para conversão, os formatos dependem do tipo do arquivo de origem
-                // (imagem → formatos de imagem, vídeo → vídeo/áudio, etc.).
                 MediaType::Convert => {
                     crate::download::engine::output_formats(
                         crate::download::engine::categorize(&source_file),
@@ -1164,7 +1239,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
             let qualities = vec!["best", "medium", "high"];
             let window_title = if is_convert { s.cfg_convert } else { s.cfg_download };
 
-            // Garante (uma vez) a textura da miniatura para esta pré-visualização.
             if let Some(pv) = &preview {
                 match &pv.thumbnail {
                     Some(thumb) if app.thumb_key.as_deref() != Some(pv.title.as_str()) => {
@@ -1227,7 +1301,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                         );
                     }
 
-                    // Aviso de duplicado (já baixado antes).
                     if !is_convert && app.db.url_exists(&url) {
                         ui.label(
                             egui::RichText::new(s.dup_warning)
@@ -1273,7 +1346,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                     }
                     ui.add_space(6.0);
 
-                    // Perfis de download (presets) aplicáveis a este tipo.
                     if !is_convert {
                         let mt_id = if media_type == MediaType::Music { "music" } else { "video" };
                         let profiles: Vec<(String, String, String)> = app
@@ -1319,7 +1391,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                             }
                         }
                     });
-                    // Mantém a extensão do nome do arquivo igual ao formato escolhido.
                     {
                         let stem = std::path::Path::new(&new_file_name)
                             .file_stem()
@@ -1327,9 +1398,34 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                             .unwrap_or_else(|| new_file_name.clone());
                         new_file_name = format!("{}.{}", stem, new_format);
                     }
+
+                    if is_convert
+                        && crate::download::engine::categorize(&source_file)
+                            == crate::download::engine::FileCategory::Office
+                    {
+                        let eng = match app.config.convert_engine {
+                            crate::config::settings::ConvertEngine::Auto => {
+                                if pt { "Automático" } else { "Automatic" }
+                            }
+                            crate::config::settings::ConvertEngine::Rust => {
+                                if pt { "Rust puro" } else { "Pure Rust" }
+                            }
+                            crate::config::settings::ConvertEngine::LibreOffice => "LibreOffice",
+                            crate::config::settings::ConvertEngine::MsOffice => "MS Office",
+                        };
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(if pt {
+                                format!("⚙  Motor: {}  ·  troque em Configurações para mais fidelidade", eng)
+                            } else {
+                                format!("⚙  Engine: {}  ·  change it in Settings for higher fidelity", eng)
+                            })
+                            .color(theme::text_faint())
+                            .size(11.0),
+                        );
+                    }
                     ui.add_space(6.0);
 
-                    // Preset de conversão (vídeo de origem → vídeo).
                     if is_convert
                         && crate::download::engine::categorize(&source_file)
                             == crate::download::engine::FileCategory::Video
@@ -1364,7 +1460,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 }
                             }
                         });
-                        // Campos do ajuste manual.
                         if new_convert_preset.starts_with("manual:") {
                             let parts: Vec<String> = new_convert_preset
                                 .splitn(5, ':')
@@ -1415,7 +1510,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                         });
                         ui.add_space(6.0);
 
-                        // Resolução máxima (apenas vídeo, quando há resoluções conhecidas).
                         if media_type == MediaType::Video {
                             if let Some(pv) = &preview {
                                 if !pv.resolutions.is_empty() {
@@ -1455,7 +1549,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                             }
                         }
 
-                        // Recorte por tempo (trim).
                         ui.checkbox(&mut new_clip_enabled, s.clip_label);
                         if new_clip_enabled {
                             ui.horizontal(|ui| {
@@ -1474,8 +1567,50 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                             });
                         }
 
-                        // Gravar live do início (apenas vídeo).
-                        if media_type == MediaType::Video {
+                        if is_live {
+                            ui.add_space(6.0);
+                            egui::Frame::none()
+                                .fill(theme::bg_card_hover())
+                                .rounding(egui::Rounding::same(8.0))
+                                .inner_margin(egui::Margin::same(10.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(if pt {
+                                                "🔴 AO VIVO"
+                                            } else {
+                                                "🔴 LIVE"
+                                            })
+                                            .color(theme::danger())
+                                            .strong(),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(if pt {
+                                                "— será gravado até você parar"
+                                            } else {
+                                                "— records until you stop"
+                                            })
+                                            .color(theme::text_muted())
+                                            .size(12.0),
+                                        );
+                                    });
+                                    ui.add_space(4.0);
+                                    ui.radio_value(
+                                        &mut new_live_from_start,
+                                        false,
+                                        if pt { "Gravar a partir de agora" } else { "Record from now" },
+                                    );
+                                    ui.radio_value(
+                                        &mut new_live_from_start,
+                                        true,
+                                        if pt {
+                                            "Desde o início (DVR) — pode ser enorme em lives longas"
+                                        } else {
+                                            "From the start (DVR) — can be huge on long lives"
+                                        },
+                                    );
+                                });
+                        } else if media_type == MediaType::Video {
                             ui.checkbox(&mut new_live_from_start, s.live_label);
                         }
                     }
@@ -1511,7 +1646,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 );
                             }
 
-                            // Organização automática (tipo/data/canal).
                             let media_str = match media_type {
                                 MediaType::Music => "music",
                                 MediaType::Video => "video",
@@ -1572,6 +1706,19 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 Some(app.config.rate_limit.clone())
                             };
                             let captured_fragments = app.config.concurrent_fragments;
+                            let captured_convert_engine = app.config.convert_engine;
+                            let captured_is_live =
+                                app.operation.lock().map(|o| o.is_live).unwrap_or(false) && !is_convert;
+                            let captured_stop = if captured_is_live {
+                                let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                app.live_stop = Some(flag.clone());
+                                app.live_started = Some(std::time::Instant::now());
+                                Some(flag)
+                            } else {
+                                app.live_stop = None;
+                                app.live_started = None;
+                                None
+                            };
                             let engine = app.engine.clone();
                             let op_state = app.operation.clone();
                             let db = crate::db::database::Database::open(&app.config.db_path());
@@ -1604,6 +1751,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                                 &captured_path,
                                                 &captured_format,
                                                 &captured_preset,
+                                                captured_convert_engine,
                                             )
                                             .await
                                         } else {
@@ -1612,6 +1760,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                                     if let Ok(mut s) = progress_state.lock() {
                                                         s.progress =
                                                             Some((pr.fraction.clamp(0.0, 1.0)) as f32);
+                                                        s.live_bytes = pr.downloaded_bytes;
                                                     }
                                                 };
                                             let opts = crate::download::engine::DownloadOptions {
@@ -1624,6 +1773,8 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                                 rate_limit: captured_rate,
                                                 concurrent_fragments: captured_fragments,
                                                 live_from_start: captured_live,
+                                                is_live: captured_is_live,
+                                                stop: captured_stop,
                                             };
                                             eng.fetch_and_download(
                                                 &captured_url,
@@ -1639,7 +1790,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                                 let file_size = std::fs::metadata(&p)
                                                     .ok()
                                                     .map(|m| m.len() as i64);
-                                                // Cópia automática para a pasta de nuvem.
                                                 if let Some(cloud) = &captured_cloud {
                                                     if let Some(name) = p.file_name() {
                                                         let dest =
@@ -1691,9 +1841,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                     });
                 });
 
-            // Persiste as edições do modal de volta no estado a cada frame.
-            // Sem isso, formato/qualidade/nome/pasta só viveriam no frame atual
-            // e a seleção "voltaria" sozinha, parecendo que os botões não clicam.
             {
                 let mut op = app.operation.lock().unwrap();
                 if op.phase == DownloadPhase::Configuring {
@@ -1726,47 +1873,130 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                 .fixed_size([400.0, 230.0])
                 .show(ctx, |ui: &mut egui::Ui| {
                     ui.vertical_centered(|ui: &mut egui::Ui| {
-                        ui.label(msg.as_str());
-                        match progress {
-                            Some(p) => {
-                                ui.add(
-                                    egui::ProgressBar::new(p)
+                        let mut stop_save = false;
+                        if is_live {
+                            ui.label(
+                                egui::RichText::new(if pt {
+                                    "🔴 Gravando ao vivo"
+                                } else {
+                                    "🔴 Recording live"
+                                })
+                                .color(theme::danger())
+                                .size(16.0)
+                                .strong(),
+                            );
+                            ui.add_space(2.0);
+                            ui.label(msg.as_str());
+                            ui.add(
+                                egui::ProgressBar::new(0.0)
+                                    .fill(theme::danger())
+                                    .animate(true),
+                            );
+                            ui.add_space(6.0);
+                            let elapsed = app
+                                .live_started
+                                .map(|t| t.elapsed().as_secs())
+                                .unwrap_or(0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "⏱ {:02}:{:02}:{:02}   ·   💾 {}",
+                                    elapsed / 3600,
+                                    (elapsed % 3600) / 60,
+                                    elapsed % 60,
+                                    crate::download::engine::format_size(live_bytes as i64),
+                                ))
+                                .color(theme::text())
+                                .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "⬇  {}/s",
+                                    crate::download::engine::format_size(speed as i64)
+                                ))
+                                .color(theme::text_muted())
+                                .size(12.0),
+                            );
+                            sparkline(ui, &hist);
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(if pt {
+                                                "⏹ Parar e salvar"
+                                            } else {
+                                                "⏹ Stop & save"
+                                            })
+                                            .color(Color32::WHITE),
+                                        )
                                         .fill(theme::accent())
-                                        .show_percentage(),
-                                );
+                                        .min_size(egui::vec2(150.0, 34.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    stop_save = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(if pt {
+                                                "Descartar"
+                                            } else {
+                                                "Discard"
+                                            })
+                                            .color(theme::text()),
+                                        )
+                                        .fill(theme::bg_card()),
+                                    )
+                                    .clicked()
+                                {
+                                    cancel = true;
+                                }
+                            });
+                        } else {
+                            ui.label(msg.as_str());
+                            match progress {
+                                Some(p) => {
+                                    ui.add(
+                                        egui::ProgressBar::new(p)
+                                            .fill(theme::accent())
+                                            .show_percentage(),
+                                    );
+                                }
+                                None => {
+                                    ui.add(
+                                        egui::ProgressBar::new(0.0)
+                                            .fill(theme::accent())
+                                            .animate(true)
+                                            .text(s.dl_processing),
+                                    );
+                                }
                             }
-                            None => {
-                                // Progresso indeterminado (áudio/conversão): barra animada.
-                                ui.add(
-                                    egui::ProgressBar::new(0.0)
-                                        .fill(theme::accent())
-                                        .animate(true)
-                                        .text(s.dl_processing),
-                                );
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "⬇  {}/s",
+                                    crate::download::engine::format_size(speed as i64)
+                                ))
+                                .color(theme::accent())
+                                .strong(),
+                            );
+                            sparkline(ui, &hist);
+                            ui.add_space(8.0);
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(s.btn_cancel_dl).color(theme::text()),
+                                    )
+                                    .fill(theme::bg_card()),
+                                )
+                                .clicked()
+                            {
+                                cancel = true;
                             }
                         }
-                        // Dashboard de rede: velocidade atual + gráfico ao vivo.
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "⬇  {}/s",
-                                crate::download::engine::format_size(speed as i64)
-                            ))
-                            .color(theme::accent())
-                            .strong(),
-                        );
-                        sparkline(ui, &hist);
-                        ui.add_space(8.0);
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(s.btn_cancel_dl).color(theme::text()),
-                                )
-                                .fill(theme::bg_card()),
-                            )
-                            .clicked()
-                        {
-                            cancel = true;
+                        if stop_save {
+                            app.stop_live_recording();
                         }
                     });
                 });

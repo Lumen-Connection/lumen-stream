@@ -18,7 +18,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     );
     ui.add_space(20.0);
 
-    // --- Entrada em lote ---
     theme::card_frame().show(ui, |ui| {
         ui.label(
             egui::RichText::new(s.queue_input_label)
@@ -36,7 +35,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         );
         ui.add_space(10.0);
 
-        // Tipo (música/vídeo)
         ui.horizontal(|ui| {
             ui.label(s.queue_type);
             if type_button(ui, s.type_music, app.batch_media_type == MediaType::Music) {
@@ -50,7 +48,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         });
         ui.add_space(6.0);
 
-        // Formato
         let formats: &[&str] = if app.batch_media_type == MediaType::Music {
             &["mp3", "m4a", "opus", "flac"]
         } else {
@@ -68,7 +65,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         });
         ui.add_space(6.0);
 
-        // Qualidade
         ui.horizontal(|ui| {
             ui.label(s.settings_quality);
             for q in ["best", "medium", "high"] {
@@ -114,7 +110,6 @@ fn enqueue_input(app: &mut App) {
 
     for url in lines {
         if queue::is_playlist(&url) {
-            // Expande a playlist em segundo plano e adiciona cada vídeo.
             if let (Some(engine), Some(pid)) =
                 (app.engine.clone(), queue::playlist_id_from_url(&url))
             {
@@ -155,7 +150,6 @@ fn enqueue_input(app: &mut App) {
 }
 
 fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
-    // Snapshot para não segurar o lock enquanto desenha.
     let snapshot: Vec<(u64, String, String, JobStatus, Option<f32>, f32, u64)> = app
         .queue
         .jobs
@@ -188,8 +182,8 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
     }
 
     let mut cancel_id: Option<u64> = None;
-    let mut move_action: Option<(u64, bool)> = None; // (id, para_cima)
-    let mut top_action: Option<u64> = None; // "baixar agora"
+    let mut move_action: Option<(u64, bool)> = None;
+    let mut top_action: Option<u64> = None;
     let mut pause_id: Option<u64> = None;
     let mut resume_id: Option<u64> = None;
 
@@ -197,7 +191,6 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
             for (id, title, format, status, progress, speed, eta) in &snapshot {
                 ui.horizontal(|ui| {
-                    // Status colorido
                     let (label, color) = status_label(status, s);
                     ui.add_sized(
                         egui::vec2(90.0, 18.0),
@@ -230,7 +223,6 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
                                         );
                                     }
                                 }
-                                // Velocidade + ETA do item.
                                 if *speed > 0.0 {
                                     let eta_txt = if *eta > 0 {
                                         format!(" · ETA {}:{:02}", eta / 60, eta % 60)
@@ -282,7 +274,6 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
                             {
                                 cancel_id = Some(*id);
                             }
-                            // Pausar (em execução) / retomar (pausado).
                             if matches!(status, JobStatus::Running) {
                                 if icon_btn(ui, "⏸") {
                                     pause_id = Some(*id);
@@ -292,7 +283,6 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
                                     resume_id = Some(*id);
                                 }
                             }
-                            // Reordenar (apenas itens ainda na fila).
                             if matches!(status, JobStatus::Queued) {
                                 if ui
                                     .add(

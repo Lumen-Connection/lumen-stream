@@ -1,4 +1,3 @@
-//! Log simples em arquivo (`%AppData%/LumenDownloader/lumen.log`).
 
 use std::io::Write;
 use std::path::PathBuf;

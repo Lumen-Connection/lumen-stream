@@ -26,7 +26,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     );
     ui.add_space(20.0);
 
-    // --- Coleta tudo de uma vez do histórico ativo ---
     let all = app.db.all_active_history();
     let now = chrono::Local::now().naive_local();
     let parse = |s: &str| {
@@ -97,12 +96,10 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             .unwrap_or_else(|| "—".to_string())
     };
 
-    // Layout em 2 colunas (1 em janelas estreitas) para preencher a tela.
     let ncols = if ui.available_width() > 880.0 { 2 } else { 1 };
     let right_idx = if ncols == 2 { 1 } else { 0 };
 
     ui.columns(ncols, |cols| {
-        // ----- Coluna esquerda -----
         let left = &mut cols[0];
         card(left, |ui| {
             section(ui, if pt { "Resumo" } else { "Summary" });
@@ -139,7 +136,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             });
         }
 
-        // ----- Coluna direita -----
         let right = &mut cols[right_idx];
         card(right, |ui| {
             section(ui, if pt { "Atividade" } else { "Activity" });
@@ -163,7 +159,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     });
 }
 
-/// Extrai o domínio de uma URL (sem esquema e sem "www.").
 fn domain(url: &str) -> Option<String> {
     let u = url.trim();
     if u.is_empty() {
@@ -179,7 +174,6 @@ fn domain(url: &str) -> Option<String> {
     }
 }
 
-/// Os `n` itens mais frequentes, ordenados por contagem (desc).
 fn top(map: &HashMap<String, i64>, n: usize) -> Vec<(String, i64)> {
     let mut v: Vec<(String, i64)> = map.iter().map(|(k, c)| (k.clone(), *c)).collect();
     v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -189,7 +183,6 @@ fn top(map: &HashMap<String, i64>, n: usize) -> Vec<(String, i64)> {
 
 fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     theme::card_frame().show(ui, |ui| {
-        // Ocupa a largura da coluna.
         ui.set_min_width(ui.available_width() - 1.0);
         add(ui);
     });
@@ -223,7 +216,6 @@ fn kv(ui: &mut egui::Ui, label: &str, value: String) {
     ui.add_space(3.0);
 }
 
-/// Linha com rótulo, barra proporcional discreta e contagem.
 fn bar_row(ui: &mut egui::Ui, label: &str, count: i64, max: i64) {
     ui.horizontal(|ui| {
         ui.add_sized(

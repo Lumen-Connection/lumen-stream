@@ -23,7 +23,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     );
     ui.add_space(20.0);
 
-    // --- FAQ ---
     let faq: &[(&str, &str)] = if pt {
         &[
             ("Como baixar um vídeo ou música?",
@@ -75,7 +74,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     ui.add_space(16.0);
 
-    // --- Atalhos ---
     theme::card_frame().show(ui, |ui| {
         ui.label(
             egui::RichText::new(if pt { "Atalhos de teclado" } else { "Keyboard shortcuts" })
@@ -105,7 +103,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     ui.add_space(16.0);
 
-    // --- Status das dependências ---
     if !app.deps_requested {
         app.deps_requested = true;
         app.refresh_deps();
@@ -152,8 +149,8 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     ui.add_space(16.0);
 
-    // --- Suporte ---
     let mut report = false;
+    let mut suggest = false;
     let mut meta = false;
     theme::card_frame().show(ui, |ui| {
         ui.label(
@@ -171,6 +168,12 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
                 report = true;
             }
             if ui
+                .add(theme::ghost_button(if pt { "💡 Enviar sugestão" } else { "💡 Send a suggestion" }))
+                .clicked()
+            {
+                suggest = true;
+            }
+            if ui
                 .add(theme::ghost_button(if pt { "ℹ Ver metadados de um arquivo" } else { "ℹ View file metadata" }))
                 .clicked()
             {
@@ -180,9 +183,9 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(if pt {
-                "\"Reportar bug\" copia um relatório de diagnóstico e abre a pasta de logs."
+                "\"Reportar bug\" e \"Enviar sugestão\" abrem um novo issue no GitHub já com um modelo."
             } else {
-                "\"Report a bug\" copies a diagnostic report and opens the logs folder."
+                "\"Report a bug\" and \"Send a suggestion\" open a new GitHub issue with a template."
             })
             .color(theme::text_faint())
             .size(11.0),
@@ -192,6 +195,9 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     if report {
         report_bug(app, pt);
     }
+    if suggest {
+        report_suggestion(app, pt);
+    }
     if meta {
         if let Some(f) = rfd::FileDialog::new().pick_file() {
             app.show_metadata(f.to_string_lossy().to_string());
@@ -199,51 +205,65 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     }
 }
 
-/// Monta um relatório de diagnóstico, copia para a área de transferência e abre os logs.
 fn report_bug(app: &mut App, pt: bool) {
-    let data_dir = crate::config::settings::Config::config_path()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_default();
-    let log_path = data_dir.join("lumen.log");
+    let title = "Bug: ";
+    let body = if pt {
+        "**Descreva o que aconteceu:**\n- \n\n\
+         **Passos para reproduzir:**\n1. \n\n\
+         **Comportamento esperado:**\n- \n"
+    } else {
+        "**Describe what happened:**\n- \n\n\
+         **Steps to reproduce:**\n1. \n\n\
+         **Expected behavior:**\n- \n"
+    };
+    open_new_issue(app, pt, "bug", title, body);
+}
 
-    // Últimas linhas do log para contexto.
-    let tail = std::fs::read_to_string(&log_path)
-        .ok()
-        .map(|c| {
-            c.lines()
-                .rev()
-                .take(15)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
+fn report_suggestion(app: &mut App, pt: bool) {
+    let title = if pt { "Sugestão: " } else { "Suggestion: " };
+    let body = if pt {
+        "**Qual é a sua ideia?**\n- \n\n\
+         **Que problema ela resolve?**\n- \n\n\
+         **Como você imagina que funcionaria?**\n- \n"
+    } else {
+        "**What's your idea?**\n- \n\n\
+         **What problem does it solve?**\n- \n\n\
+         **How would it work?**\n- \n"
+    };
+    open_new_issue(app, pt, "enhancement", title, body);
+}
 
-    let report = format!(
-        "Lumen Downloader — relatório de bug\n\
-         Versão: 0.1\n\
-         SO: {} ({})\n\
-         Data: {}\n\n\
-         Descreva o que aconteceu:\n- \n\n\
-         Passos para reproduzir:\n1. \n\n\
-         Log (últimas linhas):\n{}\n",
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-        if tail.is_empty() { "(sem log)" } else { &tail }
+fn open_new_issue(app: &mut App, pt: bool, label: &str, title: &str, body: &str) {
+    // Reserva: copia o modelo caso o link pré-preenchido exceda o limite do GitHub.
+    theme::set_clipboard(&format!("{}\n\n{}", title, body));
+
+    let url = format!(
+        "https://github.com/Lumen-Connection/lumen-downloader/issues/new?labels={}&title={}&body={}",
+        percent_encode(label),
+        percent_encode(title),
+        percent_encode(body),
     );
+    open::that(&url).ok();
 
-    theme::set_clipboard(&report);
-    open::that(&data_dir).ok();
     app.toast(
         if pt {
-            "Relatório copiado. Cole onde for reportar; a pasta de logs foi aberta."
+            "Abrindo o GitHub para você abrir um novo issue."
         } else {
-            "Report copied. Paste it where you report; the logs folder was opened."
+            "Opening GitHub to file a new issue."
         },
         false,
     );
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }

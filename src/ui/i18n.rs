@@ -1,4 +1,3 @@
-//! Internacionalização simples (PT-BR / EN) com strings estáticas.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +13,6 @@ impl Default for Lang {
     }
 }
 
-/// Conjunto de strings traduzíveis da interface.
 #[allow(dead_code)]
 pub struct Strings {
     pub nav_home: &'static str,
@@ -101,7 +99,6 @@ pub struct Strings {
     pub stat_convert: &'static str,
     pub stat_total_size: &'static str,
 
-    // Modal de configuração
     pub cfg_download: &'static str,
     pub cfg_convert: &'static str,
     pub f_title: &'static str,
@@ -144,7 +141,6 @@ pub struct Strings {
     pub btn_open_folder: &'static str,
     pub btn_close: &'static str,
 
-    // Histórico
     pub hist_downloads: &'static str,
     pub hist_conversions: &'static str,
     pub hist_empty: &'static str,
@@ -158,7 +154,6 @@ pub struct Strings {
     pub view_grid: &'static str,
     pub view_list: &'static str,
 
-    // Converter / Pastas
     pub conv_title: &'static str,
     pub conv_subtitle: &'static str,
     pub conv_pick: &'static str,

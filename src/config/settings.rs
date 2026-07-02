@@ -4,11 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::ui::i18n::Lang;
 
-/// Perfil de download salvo (preset de formato + qualidade por tipo).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DownloadProfile {
     pub name: String,
-    pub media_type: String, // "music" | "video"
+    pub media_type: String,
     pub format: String,
     pub quality: String,
 }
@@ -22,6 +21,20 @@ pub enum Theme {
 impl Default for Theme {
     fn default() -> Self {
         Theme::Dark
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
+pub enum ConvertEngine {
+    Auto,
+    Rust,
+    LibreOffice,
+    MsOffice,
+}
+
+impl Default for ConvertEngine {
+    fn default() -> Self {
+        ConvertEngine::Auto
     }
 }
 
@@ -50,65 +63,48 @@ pub struct Config {
     pub win_h: f32,
     #[serde(default)]
     pub rate_limit: String,
-    // Fragmentos baixados em paralelo (acelera). 0/1 = padrão do yt-dlp.
     #[serde(default = "default_fragments")]
     pub concurrent_fragments: u32,
-    // Organização automática em subpastas: "none" | "type" | "date" | "channel".
     #[serde(default = "default_organize")]
     pub organize_by: String,
-    // Pasta de nuvem (Drive/Dropbox/OneDrive sincronizado) para cópia automática.
     #[serde(default)]
     pub cloud_folder: String,
     #[serde(default)]
     pub copy_to_cloud: bool,
-    /// Exibir histórico em grade (true) ou em lista (false).
     #[serde(default)]
     pub history_grid: bool,
-    /// Escala da interface (1.0 = padrão).
     #[serde(default = "default_scale")]
     pub ui_scale: f32,
-    /// Modo de alto contraste (acessibilidade).
     #[serde(default)]
     pub high_contrast: bool,
-    /// Densidade compacta da interface.
     #[serde(default)]
     pub compact_ui: bool,
-    /// Traduzir a transcrição para inglês (whisper --translate).
     #[serde(default)]
     pub transcribe_translate: bool,
-    /// Template do nome do arquivo (tokens: %(title)s, %(uploader)s).
     #[serde(default = "default_template")]
     pub filename_template: String,
-    /// Limpar automaticamente o nome (remover [Official Video], - Topic, etc.).
     #[serde(default = "default_true")]
     pub smart_rename: bool,
-    /// Cards de atalho da Home (ids ordenados) e os fixados (favoritos).
     #[serde(default = "default_home_cards")]
     pub home_cards: Vec<String>,
     #[serde(default)]
     pub home_pinned: Vec<String>,
-    /// Última aba aberta (id) e confirmação ao limpar histórico.
     #[serde(default)]
     pub last_tab: String,
     #[serde(default)]
     pub confirm_delete: bool,
-    /// Boas-vindas já vistas (onboarding).
     #[serde(default)]
     pub onboarded: bool,
-    /// Perfis de download salvos.
     #[serde(default)]
     pub profiles: Vec<DownloadProfile>,
-    /// Re-tentar automaticamente downloads que falharem por rede.
     #[serde(default = "default_true")]
     pub auto_retry: bool,
-    /// Conversão de imagens em lote: formato, largura máx (0=original) e qualidade.
     #[serde(default = "default_img_format")]
     pub image_format: String,
     #[serde(default)]
     pub image_max_width: u32,
     #[serde(default = "default_img_quality")]
     pub image_quality: u32,
-    /// Marca d'água do usuário (caminho da imagem) e parâmetros.
     #[serde(default)]
     pub watermark_path: String,
     #[serde(default = "default_wm_pos")]
@@ -117,6 +113,10 @@ pub struct Config {
     pub watermark_scale: u32,
     #[serde(default = "default_wm_opacity")]
     pub watermark_opacity: f32,
+    #[serde(default)]
+    pub convert_engine: ConvertEngine,
+    #[serde(default = "default_true")]
+    pub gamepad_enabled: bool,
 }
 
 fn default_template() -> String {
@@ -216,6 +216,8 @@ impl Default for Config {
             watermark_opacity: default_wm_opacity(),
             win_w: default_win_w(),
             win_h: default_win_h(),
+            convert_engine: ConvertEngine::default(),
+            gamepad_enabled: true,
         }
     }
 }
@@ -231,7 +233,6 @@ impl Config {
         Self::data_dir().join("config.json")
     }
 
-    /// Carrega as configurações do disco, ou usa os padrões na primeira execução.
     pub fn load() -> Self {
         let path = Self::config_path();
         match std::fs::read_to_string(&path) {
@@ -240,7 +241,6 @@ impl Config {
         }
     }
 
-    /// Salva as configurações no disco.
     pub fn save(&self) {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {

@@ -1,4 +1,3 @@
-// Compila como app de GUI (sem janela de console) no Windows.
 #![windows_subsystem = "windows"]
 
 mod app;
@@ -6,7 +5,9 @@ mod applog;
 mod config;
 mod db;
 mod download;
+mod gamepad;
 mod notify;
+mod player;
 mod queue;
 mod ui;
 
@@ -38,15 +39,11 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Ícone da janela (losango da marca). Usa o PNG do logo+nome e recorta o
-/// quadrado da esquerda (o losango), pois o ICO pode conter PNG interno que o
-/// crate `image` não decodifica.
 fn load_window_icon() -> Option<egui::IconData> {
     let bytes = include_bytes!("../assets/FULL LOGO LUMEN DOWLOADER PNG.png");
     let rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = rgba.dimensions();
     let side = w.min(h);
-    // Recorta o quadrado à esquerda (onde fica o losango) e reduz para 256.
     let cropped = image::imageops::crop_imm(&rgba, 0, 0, side, side).to_image();
     let icon = image::DynamicImage::ImageRgba8(cropped)
         .thumbnail(256, 256)

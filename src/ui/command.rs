@@ -1,4 +1,3 @@
-//! Paleta de comandos (Ctrl+K) / caixa de ferramentas rápida.
 
 use crate::app::{App, Tab};
 use crate::config::settings::Theme;
@@ -13,7 +12,6 @@ pub enum Cmd {
     ClearTemp,
 }
 
-/// Lista de comandos disponíveis (rótulo + ação).
 pub fn all_commands(pt: bool) -> Vec<(String, Cmd)> {
     let go = |icon: &str, name: &str, tab: Tab| (format!("{}  {}", icon, name), Cmd::Go(tab));
     vec![
@@ -48,7 +46,6 @@ pub fn all_commands(pt: bool) -> Vec<(String, Cmd)> {
     ]
 }
 
-/// Executa um comando.
 pub fn run(app: &mut App, cmd: Cmd) {
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
     match cmd {

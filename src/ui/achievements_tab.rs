@@ -11,12 +11,10 @@ struct Badge {
     unlocked: bool,
 }
 
-/// Constrói a lista completa de conquistas a partir das métricas.
 fn build_badges(pt: bool, total: i64, mc: i64, vc: i64, cc: i64) -> Vec<Badge> {
     let mut v: Vec<Badge> = Vec::new();
     let tr = |p: &str, e: &str| if pt { p.to_string() } else { e.to_string() };
 
-    // --- Marcos de total de downloads ---
     let total_tiers: &[(i64, &str, &str)] = &[
         (1, "Iniciante", "Beginner"),
         (5, "Aprendiz", "Apprentice"),
@@ -48,7 +46,6 @@ fn build_badges(pt: bool, total: i64, mc: i64, vc: i64, cc: i64) -> Vec<Badge> {
         });
     }
 
-    // --- Música ---
     let music_tiers: &[(i64, &str, &str)] = &[
         (1, "Ouvinte", "Listener"),
         (5, "Fã", "Fan"),
@@ -69,7 +66,6 @@ fn build_badges(pt: bool, total: i64, mc: i64, vc: i64, cc: i64) -> Vec<Badge> {
         });
     }
 
-    // --- Vídeo ---
     let video_tiers: &[(i64, &str, &str)] = &[
         (1, "Espectador", "Viewer"),
         (5, "Cinéfilo", "Cinephile"),
@@ -90,7 +86,6 @@ fn build_badges(pt: bool, total: i64, mc: i64, vc: i64, cc: i64) -> Vec<Badge> {
         });
     }
 
-    // --- Conversões ---
     let convert_tiers: &[(i64, &str, &str)] = &[
         (1, "Conversor", "Converter"),
         (3, "Alquimista", "Alchemist"),
@@ -111,7 +106,6 @@ fn build_badges(pt: bool, total: i64, mc: i64, vc: i64, cc: i64) -> Vec<Badge> {
         });
     }
 
-    // --- Combos / especiais ---
     let combos: &[(&str, &str, &str, &str, &str, bool)] = &[
         ("🎉", "Estreia", "Debut", "Seu 1º download", "Your 1st download", total >= 1),
         ("🧩", "Tripé", "Tripod", "1 de cada tipo", "1 of each type", mc >= 1 && vc >= 1 && cc >= 1),
@@ -180,9 +174,8 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     );
     ui.add_space(12.0);
 
-    // Grade de cartões: calcula colunas pela largura disponível e quebra em linhas.
     let avail = ui.available_width();
-    let col_w = 150.0 + 28.0 + 12.0; // largura + margens + espaçamento
+    let col_w = 150.0 + 28.0 + 12.0;
     let cols = ((avail / col_w).floor() as usize).max(1);
 
     egui::Grid::new("badges_grid")

@@ -5,7 +5,6 @@ use crate::ui::i18n::Lang;
 use crate::ui::theme;
 
 const IMG_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp"];
-const THUMB: f32 = 150.0;
 const MAX_IMAGES: usize = 200;
 const LOAD_PER_FRAME: usize = 6;
 
@@ -29,7 +28,6 @@ pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     );
     ui.add_space(16.0);
 
-    // Coleta imagens (pasta de download + 1 nível de subpastas).
     let images = collect_images(&app.config.default_download_dir);
 
     if images.is_empty() {
@@ -46,7 +44,6 @@ pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
         return;
     }
 
-    // Carrega no máximo algumas texturas por frame (evita travar a UI).
     let mut loaded_now = 0;
     for path in &images {
         if loaded_now >= LOAD_PER_FRAME {
@@ -57,7 +54,6 @@ pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
             if let Some(tex) = load_thumb(ctx, path) {
                 app.gallery_textures.insert(path.clone(), tex);
             } else {
-                // Marca como tentado com uma textura vazia para não repetir.
                 let blank = ctx.load_texture(
                     "blank",
                     egui::ColorImage::new([1, 1], theme::bg_card()),
@@ -70,34 +66,60 @@ pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     }
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            for path in &images {
-                if let Some(tex) = app.gallery_textures.get(path) {
-                    let [w, h] = tex.size();
-                    let scale = THUMB / w.max(1) as f32;
-                    let size = egui::vec2(THUMB, (h as f32 * scale).min(THUMB * 1.4));
-                    let resp = ui
-                        .add(egui::Image::from_texture((tex.id(), size)).sense(egui::Sense::click()))
-                        .on_hover_text(
-                            path.file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_default(),
-                        );
-                    if resp.clicked() {
-                        open::that(path).ok();
-                    }
-                } else {
-                    // Placeholder enquanto carrega.
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(THUMB, THUMB), egui::Sense::hover());
-                    ui.painter().rect_filled(
-                        rect,
-                        egui::Rounding::same(6.0),
-                        theme::bg_card(),
-                    );
+        // Grade uniforme (colunas de largura igual), como a de conquistas.
+        let cols = (((ui.available_width() + 12.0) / 200.0).floor() as usize).max(1);
+        for chunk in images.chunks(cols) {
+            ui.columns(cols, |c| {
+                for (k, path) in chunk.iter().enumerate() {
+                    let ui = &mut c[k];
+                    egui::Frame::none()
+                        .fill(theme::bg_card())
+                        .stroke(egui::Stroke::new(1.0, theme::border()))
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::same(6.0))
+                        .show(ui, |ui| {
+                            let bw = ui.available_width();
+                            let box_size = egui::vec2(bw, bw * 9.0 / 16.0);
+                            let (rect, resp) =
+                                ui.allocate_exact_size(box_size, egui::Sense::click());
+                            ui.painter().rect_filled(
+                                rect,
+                                egui::Rounding::same(4.0),
+                                theme::bg_card_hover(),
+                            );
+                            if let Some(tex) = app.gallery_textures.get(path) {
+                                let [w, h] = tex.size();
+                                let scale = (box_size.x / w.max(1) as f32)
+                                    .min(box_size.y / h.max(1) as f32);
+                                let disp = egui::vec2(w as f32 * scale, h as f32 * scale);
+                                let img_rect =
+                                    egui::Rect::from_center_size(rect.center(), disp);
+                                ui.painter().image(
+                                    tex.id(),
+                                    img_rect,
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(1.0, 1.0),
+                                    ),
+                                    egui::Color32::WHITE,
+                                );
+                            }
+                            let resp = resp.on_hover_text(
+                                path.file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                            );
+                            if resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if resp.clicked() {
+                                open::that(path).ok();
+                            }
+                        });
                 }
-            }
-        });
+            });
+            ui.add_space(12.0);
+        }
     });
 }
 
@@ -117,7 +139,6 @@ fn collect_images(root: &std::path::Path) -> Vec<PathBuf> {
         for entry in rd.flatten() {
             let p = entry.path();
             if p.is_dir() {
-                // Apenas 1 nível de subpasta a partir da raiz.
                 if dir == root {
                     dirs.push(p);
                 }

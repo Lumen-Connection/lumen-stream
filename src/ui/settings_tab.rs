@@ -1,5 +1,5 @@
 use crate::app::{App, UpdateStatus};
-use crate::config::settings::Theme;
+use crate::config::settings::{ConvertEngine, Theme};
 use crate::ui::i18n::Lang;
 use crate::ui::theme;
 
@@ -26,14 +26,12 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let mut do_reinstall = false;
     let mut do_orphans = false;
 
-    // Layout em 2 colunas (1 em janelas estreitas) para preencher a tela.
     let ncols = if ui.available_width() > 980.0 { 2 } else { 1 };
     let right_idx = if ncols == 2 { 1 } else { 0 };
 
     ui.columns(ncols, |cols| {
         let ui = &mut cols[0];
 
-    // --- Aparência (idioma + tema) ---
     theme::card_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(s.settings_language);
@@ -64,7 +62,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     ui.add_space(16.0);
 
-    // --- Acessibilidade ---
     theme::card_frame().show(ui, |ui| {
         ui.label(
             egui::RichText::new(if pt { "Acessibilidade" } else { "Accessibility" })
@@ -141,7 +138,78 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     ui.add_space(16.0);
 
-    // --- Preferências de download ---
+    theme::card_frame().show(ui, |ui| {
+        ui.label(
+            egui::RichText::new(if pt { "Controle (Joystick)" } else { "Gamepad" })
+                .color(theme::text_muted())
+                .size(11.0)
+                .strong(),
+        );
+        ui.add_space(8.0);
+        if ui
+            .checkbox(
+                &mut app.config.gamepad_enabled,
+                if pt {
+                    "Navegar com controle (DualSense e compatíveis)"
+                } else {
+                    "Navigate with a gamepad (DualSense and compatible)"
+                },
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let (dot, color) = if app.gamepad.connected {
+                ("●", theme::accent())
+            } else {
+                ("○", theme::text_faint())
+            };
+            ui.label(egui::RichText::new(dot).color(color));
+            let status = if app.gamepad.connected {
+                if pt {
+                    format!("Conectado: {}", app.gamepad.name)
+                } else {
+                    format!("Connected: {}", app.gamepad.name)
+                }
+            } else if pt {
+                "Nenhum controle detectado".to_string()
+            } else {
+                "No gamepad detected".to_string()
+            };
+            ui.label(egui::RichText::new(status).color(theme::text_muted()).size(12.0));
+        });
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(if pt {
+                "L1/R1: trocar aba · D-pad: navegar · ✕: confirmar · ○: voltar · △: tocar/pausar · ▢: parar · Options: comandos · PS: modo controle"
+            } else {
+                "L1/R1: switch tab · D-pad: navigate · ✕: confirm · ○: back · △: play/pause · ▢: stop · Options: palette · PS: gamepad mode"
+            })
+            .color(theme::text_faint())
+            .size(11.0),
+        );
+        ui.add_space(8.0);
+        if ui
+            .add(theme::ghost_button(if pt {
+                "🎮 Entrar no Modo Games"
+            } else {
+                "🎮 Enter Games Mode"
+            }))
+            .on_hover_text(if pt {
+                "Interface completa navegável pelo controle (ou pelo botão PS)."
+            } else {
+                "Full interface navigable by the gamepad (or the PS button)."
+            })
+            .clicked()
+        {
+            app.toggle_gamepad_mode();
+        }
+    });
+
+    ui.add_space(16.0);
+
     theme::card_frame().show(ui, |ui| {
         ui.label(
             egui::RichText::new(s.settings_defaults)
@@ -191,7 +259,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         }
         ui.add_space(10.0);
 
-        // Template do nome do arquivo.
         ui.label(if pt { "Nome do arquivo (template)" } else { "Filename template" });
         if ui
             .add(
@@ -224,7 +291,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         }
         ui.add_space(10.0);
 
-        // Legendas (vídeo)
         if ui.checkbox(&mut app.config.subtitles, s.settings_subtitles).changed() {
             changed = true;
         }
@@ -245,7 +311,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         }
         ui.add_space(10.0);
 
-        // Limite de velocidade
         ui.label(s.settings_rate_limit);
         if ui
             .add(
@@ -260,7 +325,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         }
         ui.add_space(8.0);
 
-        // Fragmentos em paralelo
         ui.label(s.settings_fragments);
         let mut frags = app.config.concurrent_fragments;
         if ui.add(egui::Slider::new(&mut frags, 1..=16)).changed() {
@@ -269,7 +333,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         }
         ui.add_space(10.0);
 
-        // Notificação ao concluir
         if ui
             .checkbox(&mut app.config.notify_on_complete, s.settings_notify)
             .changed()
@@ -280,7 +343,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     ui.add_space(16.0);
 
-    // --- Perfis de download ---
     theme::card_frame().show(ui, |ui| {
         ui.label(
             egui::RichText::new(if pt { "Perfis de download" } else { "Download profiles" })
@@ -358,7 +420,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
         let ui = &mut cols[right_idx];
 
-    // --- Organização & nuvem ---
     theme::card_frame().show(ui, |ui| {
         ui.label(s.settings_organize);
         ui.horizontal(|ui| {
@@ -411,7 +472,126 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     ui.add_space(16.0);
 
-    // --- Manutenção ---
+    theme::card_frame().show(ui, |ui| {
+        ui.label(
+            egui::RichText::new(if pt {
+                "Motor de conversão de documentos"
+            } else {
+                "Document conversion engine"
+            })
+            .color(theme::text_muted())
+            .size(11.0)
+            .strong(),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(if pt {
+                "Como docx/xlsx/pptx viram PDF. Maior fidelidade usa Office/LibreOffice; Rust puro é leve e sem dependências."
+            } else {
+                "How docx/xlsx/pptx become PDF. Higher fidelity uses Office/LibreOffice; pure Rust is light and dependency-free."
+            })
+            .color(theme::text_faint())
+            .size(11.0),
+        );
+        ui.add_space(8.0);
+
+        let st = crate::download::engine::engine_status();
+        let options: [(ConvertEngine, &str, bool, String); 4] = [
+            (
+                ConvertEngine::Auto,
+                if pt { "Automático" } else { "Automatic" },
+                true,
+                if pt {
+                    "Usa o melhor motor disponível".to_string()
+                } else {
+                    "Uses the best available engine".to_string()
+                },
+            ),
+            (
+                ConvertEngine::MsOffice,
+                "MS Office",
+                st.msoffice,
+                if st.msoffice {
+                    format!("{}: {}", if pt { "Detectado" } else { "Detected" }, st.msoffice_detail)
+                } else if pt {
+                    "Não instalado".to_string()
+                } else {
+                    "Not installed".to_string()
+                },
+            ),
+            (
+                ConvertEngine::LibreOffice,
+                "LibreOffice",
+                st.libreoffice,
+                if st.libreoffice {
+                    if pt { "Detectado".to_string() } else { "Detected".to_string() }
+                } else if pt {
+                    "Não instalado".to_string()
+                } else {
+                    "Not installed".to_string()
+                },
+            ),
+            (
+                ConvertEngine::Rust,
+                if pt { "Rust puro (leve)" } else { "Pure Rust (light)" },
+                true,
+                if pt {
+                    "Sempre disponível · fidelidade básica".to_string()
+                } else {
+                    "Always available · basic fidelity".to_string()
+                },
+            ),
+        ];
+
+        for (eng, label, available, detail) in options {
+            let selected = app.config.convert_engine == eng;
+            ui.horizontal(|ui| {
+                let fill = if selected {
+                    theme::accent_soft()
+                } else {
+                    theme::bg_card()
+                };
+                let txt_color = if available {
+                    theme::text()
+                } else {
+                    theme::text_faint()
+                };
+                let mark = if selected { "●  " } else { "○  " };
+                let btn = egui::Button::new(
+                    egui::RichText::new(format!("{}{}", mark, label)).color(txt_color),
+                )
+                .fill(fill)
+                .min_size(egui::vec2(160.0, 30.0));
+                if ui.add_enabled(available, btn).clicked() && !selected {
+                    app.config.convert_engine = eng;
+                    changed = true;
+                }
+                ui.label(
+                    egui::RichText::new(detail)
+                        .color(theme::text_faint())
+                        .size(10.0),
+                );
+            });
+            ui.add_space(2.0);
+        }
+
+        if !st.msoffice && !st.libreoffice {
+            ui.add_space(4.0);
+            if ui
+                .link(if pt {
+                    "↗ Instalar LibreOffice (grátis) para maior fidelidade"
+                } else {
+                    "↗ Install LibreOffice (free) for higher fidelity"
+                })
+                .clicked()
+            {
+                open::that("https://www.libreoffice.org/download/download/").ok();
+            }
+        }
+    });
+
+    ui.add_space(16.0);
+
     theme::card_frame().show(ui, |ui| {
         ui.label(
             egui::RichText::new(s.settings_maintenance)
@@ -450,7 +630,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             }
         });
         ui.add_space(10.0);
-        // Diagnóstico: abrir log e a pasta de dados.
         ui.horizontal(|ui| {
             let data_dir = crate::config::settings::Config::config_path()
                 .parent()
@@ -531,7 +710,7 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             changed = true;
         }
     });
-    }); // fim de ui.columns
+    });
 
     if do_clear {
         let n = app.clear_temp_files();
@@ -586,7 +765,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     }
 }
 
-/// Linha de botões de seleção que grava no campo `value`. Retorna `true` se mudou.
 fn format_row(ui: &mut egui::Ui, label: &str, options: &[&str], value: &mut String) -> bool {
     let mut changed = false;
     ui.label(label);

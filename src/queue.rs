@@ -1,4 +1,3 @@
-//! Fila de downloads com execução de múltiplos itens em paralelo.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,11 +31,10 @@ pub struct QueueJob {
     pub status: JobStatus,
     pub progress: Option<f32>,
     pub retries: u32,
-    pub speed: f32, // bytes/s
-    pub eta: u64,   // segundos
+    pub speed: f32,
+    pub eta: u64,
 }
 
-/// Forma serializável de um item da fila (para persistir e retomar).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedJob {
     url: String,
@@ -66,7 +64,6 @@ impl Queue {
         }
     }
 
-    /// Assinatura barata do estado da fila (para detectar mudanças e salvar).
     pub fn signature(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -77,7 +74,6 @@ impl Queue {
         h.finish()
     }
 
-    /// Salva os itens não concluídos da fila num JSON (para retomar depois).
     pub fn save(&self, path: &std::path::Path) {
         let saved: Vec<SavedJob> = self
             .jobs
@@ -106,7 +102,6 @@ impl Queue {
         }
     }
 
-    /// Restaura itens salvos como "na fila" (serão reprocessados; `--continue` retoma parciais).
     pub fn load(&mut self, path: &std::path::Path) {
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
@@ -142,7 +137,6 @@ impl Queue {
         );
     }
 
-    /// Move um item para o topo da fila ("baixar agora").
     pub fn move_to_top(&self, id: u64) {
         let mut jobs = self.jobs.lock().unwrap();
         if let Some(i) = jobs.iter().position(|j| j.id == id) {
@@ -177,7 +171,6 @@ impl Queue {
             .any(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
     }
 
-    /// Pausa um item em andamento (mantém os arquivos parciais para retomar).
     pub fn pause(&mut self, id: u64) {
         if let Some(handle) = self.handles.remove(&id) {
             handle.abort();
@@ -191,7 +184,6 @@ impl Queue {
         }
     }
 
-    /// Retoma um item pausado (volta para a fila; o yt-dlp continua o parcial).
     pub fn resume(&mut self, id: u64) {
         let mut jobs = self.jobs.lock().unwrap();
         if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
@@ -213,7 +205,6 @@ impl Queue {
         }
     }
 
-    /// Remove itens já finalizados (concluídos/falhos/cancelados).
     pub fn clear_finished(&mut self) {
         self.jobs
             .lock()
@@ -222,8 +213,6 @@ impl Queue {
         self.handles.retain(|_, h| !h.is_finished());
     }
 
-    /// Inicia itens da fila respeitando o limite de execuções simultâneas.
-    /// Deve ser chamado a cada frame enquanto houver itens ativos.
     pub fn pump(
         &mut self,
         engine: Arc<DownloadEngine>,
@@ -303,7 +292,6 @@ impl Queue {
                 set_title(&jobs, id, title.clone());
 
                 let is_music = media_type == MediaType::Music;
-                // Organização automática (tipo/data; canal não disponível na fila).
                 let mut folder = folder;
                 let media_str = if is_music { "music" } else { "video" };
                 if let Some(sub) =
@@ -332,6 +320,8 @@ impl Queue {
                     rate_limit,
                     concurrent_fragments,
                     live_from_start: false,
+                    is_live: false,
+                    stop: None,
                 };
                 match engine
                     .fetch_and_download(&url, &out_str, opts, on_progress)
@@ -370,7 +360,7 @@ impl Queue {
                             if auto_retry && network && j.retries < 2 {
                                 j.retries += 1;
                                 j.progress = None;
-                                j.status = JobStatus::Queued; // será reprocessado
+                                j.status = JobStatus::Queued;
                             } else {
                                 j.status = JobStatus::Failed(msg);
                             }
@@ -383,8 +373,6 @@ impl Queue {
     }
 }
 
-/// Adiciona um item à fila. Função livre para permitir adicionar a partir de
-/// tarefas em segundo plano (ex.: expansão de playlist).
 pub fn push_job(
     jobs: &Jobs,
     next_id: &Arc<AtomicU64>,
@@ -418,7 +406,6 @@ fn set_status(jobs: &Jobs, id: u64, status: JobStatus) {
     }
 }
 
-/// Heurística: o erro parece ser de rede/temporário (para re-tentar)?
 fn is_network_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
     m.contains("network")
@@ -444,7 +431,6 @@ fn set_progress(jobs: &Jobs, id: u64, p: f32, speed: f32, eta: u64) {
     }
 }
 
-/// Extrai o ID de playlist (`list=`) de uma URL, se houver.
 pub fn playlist_id_from_url(url: &str) -> Option<String> {
     url.split(['?', '&'])
         .find_map(|kv| kv.strip_prefix("list="))

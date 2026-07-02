@@ -17,7 +17,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     );
     ui.add_space(20.0);
 
-    // Banner de link detectado na área de transferência.
     if let Some(link) = app.clip_suggest.clone() {
         theme::card_frame().show(ui, |ui| {
             ui.label(
@@ -46,7 +45,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.add_space(12.0);
     }
 
-    // Cartão de entrada
     let mut submit = false;
     let mut transcribe = false;
     let mut thumbnail = false;

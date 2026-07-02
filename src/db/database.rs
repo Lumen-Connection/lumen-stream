@@ -67,7 +67,6 @@ impl Database {
             ",
         )
         .expect("Failed to initialize database schema");
-        // Migrações (ignoram erro se a coluna já existir).
         conn.execute(
             "ALTER TABLE history ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
             [],
@@ -108,7 +107,6 @@ impl Database {
         self.query_history(media_type, limit, 0)
     }
 
-    /// Itens na lixeira (deleted = 1).
     pub fn get_deleted_history(&self, media_type: &str, limit: usize) -> Vec<HistoryEntry> {
         self.query_history(media_type, limit, 1)
     }
@@ -142,7 +140,6 @@ impl Database {
         .collect()
     }
 
-    /// Alterna o estado de favorito de um item.
     pub fn toggle_favorite(&self, id: i64) {
         self.conn
             .execute(
@@ -152,28 +149,24 @@ impl Database {
             .ok();
     }
 
-    /// Define as tags/categorias (texto livre separado por vírgula) de um item.
     pub fn set_tags(&self, id: i64, tags: &str) {
         self.conn
             .execute("UPDATE history SET tags = ?1 WHERE id = ?2", params![tags, id])
             .ok();
     }
 
-    /// Move um item para a lixeira (soft delete).
     pub fn delete_history(&self, id: i64) {
         self.conn
             .execute("UPDATE history SET deleted = 1 WHERE id = ?1", params![id])
             .ok();
     }
 
-    /// Restaura um item da lixeira.
     pub fn restore_history(&self, id: i64) {
         self.conn
             .execute("UPDATE history SET deleted = 0 WHERE id = ?1", params![id])
             .ok();
     }
 
-    /// Move todos os itens de um tipo para a lixeira.
     pub fn clear_history(&self, media_type: &str) {
         self.conn
             .execute(
@@ -183,7 +176,6 @@ impl Database {
             .ok();
     }
 
-    /// Esvazia a lixeira (remove de vez) de um tipo.
     pub fn empty_trash(&self, media_type: &str) {
         self.conn
             .execute(
@@ -193,7 +185,6 @@ impl Database {
             .ok();
     }
 
-    /// Indica se uma URL já foi baixada (não excluída).
     pub fn url_exists(&self, url: &str) -> bool {
         if url.is_empty() {
             return false;
@@ -207,7 +198,6 @@ impl Database {
             .is_ok()
     }
 
-    /// Remove definitivamente itens da lixeira com mais de `days` dias.
     pub fn purge_old_trash(&self, days: i64) {
         self.conn
             .execute(
@@ -217,7 +207,6 @@ impl Database {
             .ok();
     }
 
-    /// Estatísticas (apenas itens não excluídos): (qtd, soma de tamanho) por tipo.
     pub fn stats(&self, media_type: &str) -> (i64, i64) {
         self.conn
             .query_row(
@@ -229,7 +218,6 @@ impl Database {
             .unwrap_or((0, 0))
     }
 
-    /// Atualiza o caminho do arquivo de um item (ex.: após mover/arquivar).
     pub fn update_file_path(&self, id: i64, new_path: &str) {
         self.conn
             .execute(
@@ -239,7 +227,6 @@ impl Database {
             .ok();
     }
 
-    /// Todos os itens ativos (não excluídos), de todos os tipos.
     pub fn all_active_history(&self) -> Vec<HistoryEntry> {
         let mut stmt = self
             .conn

@@ -21,7 +21,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     );
     ui.add_space(20.0);
 
-    // Download rápido (vídeo).
     let mut submit = false;
     theme::card_frame().show(ui, |ui| {
         ui.label(
@@ -57,7 +56,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     ui.add_space(18.0);
 
-    // --- Atalhos (cards reordenáveis / fixáveis) ---
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
     ui.horizontal(|ui| {
         ui.label(
@@ -86,7 +84,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         edit_shortcuts(app, ui, &s, pt);
     } else {
         let mut nav: Option<Tab> = None;
-        // Fixados primeiro, mantendo a ordem configurada.
         let order: Vec<String> = {
             let cards = &app.config.home_cards;
             let pinned = &app.config.home_pinned;
@@ -115,7 +112,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     ui.add_space(20.0);
 
-    // Recentes (todos os tipos).
     ui.label(
         egui::RichText::new(s.home_recents)
             .color(theme::text())
@@ -141,7 +137,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     render_recents(ui, &recents);
 }
 
-/// Catálogo de cards de atalho conhecidos.
 const CATALOG: [&str; 8] = [
     "music",
     "video",
@@ -153,7 +148,6 @@ const CATALOG: [&str; 8] = [
     "stats",
 ];
 
-/// Rótulo + aba de destino de um id de card.
 fn card_info(id: &str, s: &crate::ui::i18n::Strings) -> Option<(String, Tab)> {
     Some(match id {
         "music" => (format!("🎵  {}", s.nav_music), Tab::Music),
@@ -168,7 +162,6 @@ fn card_info(id: &str, s: &crate::ui::i18n::Strings) -> Option<(String, Tab)> {
     })
 }
 
-/// Modo de edição: reordenar (▲▼), fixar (★), remover (✕) e adicionar cards.
 fn edit_shortcuts(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings, pt: bool) {
     let mut do_save = false;
     let cards = app.config.home_cards.clone();
@@ -216,7 +209,6 @@ fn edit_shortcuts(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings
         });
     }
 
-    // Cards do catálogo ainda não exibidos.
     let hidden: Vec<&str> = CATALOG
         .iter()
         .copied()
@@ -246,7 +238,6 @@ fn edit_shortcuts(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings
     }
 }
 
-/// Botão de atalho grande para uma aba. Retorna `true` se clicado.
 fn shortcut(ui: &mut egui::Ui, label: &str) -> bool {
     ui.add(
         egui::Button::new(

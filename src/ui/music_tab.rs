@@ -1,7 +1,6 @@
 use crate::app::{App, MediaType};
 use crate::ui::theme;
 
-/// Encurta uma URL longa para exibição.
 pub fn short_link(s: &str) -> String {
     if s.chars().count() > 64 {
         let t: String = s.chars().take(64).collect();
@@ -27,7 +26,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     );
     ui.add_space(20.0);
 
-    // Banner de link detectado na área de transferência.
     if let Some(link) = app.clip_suggest.clone() {
         theme::card_frame().show(ui, |ui| {
             ui.label(
@@ -56,7 +54,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.add_space(12.0);
     }
 
-    // Cartão de entrada
     let mut submit = false;
     let mut transcribe = false;
     let mut thumbnail = false;

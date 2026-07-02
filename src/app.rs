@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::config::settings::Config;
 use crate::db::database::Database;
 
-/// Estado do editor de tags ID3.
 pub struct TagEditState {
     pub path: String,
     pub t: crate::download::engine::AudioTags,
@@ -26,85 +25,54 @@ pub struct App {
     pub config: Config,
     pub engine: Option<Arc<DownloadEngine>>,
     pub download_task: Option<tokio::task::JoinHandle<()>>,
-    /// Estado da atualização do yt-dlp exibido na tela de Configurações.
     pub update_status: Arc<Mutex<UpdateStatus>>,
-    /// Fila de downloads em lote / playlists.
     pub queue: Queue,
     pub batch_input: String,
     pub batch_media_type: MediaType,
     pub batch_format: String,
     pub batch_quality: String,
     pub history_search: String,
-    /// Filtro de formato no histórico ("" = todos).
     pub history_format_filter: String,
-    /// Textura da miniatura de pré-visualização (cache).
     pub thumb_texture: Option<egui::TextureHandle>,
     pub thumb_key: Option<String>,
-    /// Edição de nome de pasta em andamento (id, novo nome).
     pub folder_edit: Option<(i64, String)>,
-    /// Clipboard watcher: último texto visto e sugestão de link a baixar.
     pub clip_suggest: Option<String>,
     clip_seen: String,
     clip_last_check: std::time::Instant,
-    /// Conversão em lote: arquivos selecionados e formato de saída escolhido.
     pub batch_convert: Vec<std::path::PathBuf>,
     pub batch_convert_format: String,
-    /// Notificações in-app (toasts) e controle de duplicação.
     pub toasts: Vec<Toast>,
     last_signaled: Option<String>,
-    /// Fila de toasts vinda de tarefas em segundo plano (texto, é_erro).
     pub toast_queue: Arc<Mutex<Vec<(String, bool)>>>,
-    /// Estado do inspetor de formatos (janela popup).
     pub inspector: Arc<Mutex<InspectorState>>,
-    /// Janela genérica de informação (título, corpo) — ex.: metadados de arquivo.
     pub info_window: Arc<Mutex<Option<(String, String)>>>,
-    /// Janela com QR code do link de origem (url, textura).
     pub qr_window: Option<(String, egui::TextureHandle)>,
-    /// Diálogo de reordenação de PDF: (arquivo, ordem digitada).
     pub pdf_reorder: Option<(PathBuf, String)>,
-    /// Editor de tags ID3 (janela).
     pub tag_editor: Option<TagEditState>,
     bpm_result: Arc<Mutex<Option<u32>>>,
-    /// Filtro "só favoritos" no histórico e diálogo de tags/categorias (id, texto).
     pub history_fav_only: bool,
     pub history_tag_edit: Option<(i64, String)>,
-    /// Modo de edição dos cards de atalho da Home.
     pub home_edit: bool,
-    /// Itens do histórico selecionados (ações em massa).
     pub selected: std::collections::HashSet<i64>,
-    /// Lista de arquivos órfãos encontrados (janela).
     pub orphans: Option<Vec<PathBuf>>,
-    /// Rascunho do novo perfil de download (na tela de Configurações).
     pub profile_draft: crate::config::settings::DownloadProfile,
-    /// Tela cheia (modo quiosque).
     pub fullscreen: bool,
-    /// Último download (url, tipo) para "repetir".
     pub last_download: Option<(String, MediaType)>,
-    /// Confirmação pendente de "limpar histórico" (media_type).
     pub pending_clear: Option<String>,
-    /// Assinatura da fila para detectar mudanças e persistir.
     queue_sig: u64,
-    /// Abas destacadas em janelas próprias (multi-janela).
     pub detached: Vec<Tab>,
-    /// Pré-visualização da marca d'água: vídeo de amostra, textura e controle.
     pub wm_preview_video: Option<PathBuf>,
     pub wm_preview_tex: Option<egui::TextureHandle>,
     pub wm_preview_sig: String,
     pub wm_preview_busy: bool,
     wm_preview_ready: Arc<Mutex<Option<PathBuf>>>,
-    /// Status/versões das dependências (yt-dlp, ffmpeg, pdfium, whisper).
     pub deps_status: Arc<Mutex<Vec<(String, String)>>>,
     pub deps_requested: bool,
-    /// Paleta de comandos (Ctrl+K).
     pub cmd_palette_open: bool,
     pub cmd_query: String,
-    /// Sinaliza reaplicar o tema/estilo no próximo frame.
     pub restyle: bool,
-    /// Logo (logo + nome) exibido na sidebar — carregado uma vez.
     pub brand_texture: Option<egui::TextureHandle>,
-    /// Cache de texturas da galeria de miniaturas (por caminho).
     pub gallery_textures: HashMap<PathBuf, egui::TextureHandle>,
-    /// Miniaturas de vídeos do histórico: texturas carregadas e geração em background.
     pub thumb_textures: HashMap<String, egui::TextureHandle>,
     thumb_ready: Arc<Mutex<Vec<(String, PathBuf)>>>,
     thumb_inflight: std::collections::HashSet<String>,
@@ -113,18 +81,24 @@ pub struct App {
     style_set: bool,
     update_checked: bool,
     win_dirty: bool,
+    pub mini: crate::player::MiniPlayer,
+    pub gamepad: crate::gamepad::GamepadNav,
+    pub gamepad_mode: bool,
+    steam_in_game: bool,
+    steam_forced_mode: bool,
+    steam_last_check: std::time::Instant,
+    gp_focus_applied: bool,
+    pub live_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub live_started: Option<std::time::Instant>,
 }
 
-/// Uma notificação efêmera exibida no canto da tela.
 pub struct Toast {
     pub text: String,
     pub error: bool,
     pub created: std::time::Instant,
-    /// Se presente, mostra um botão "Desfazer" que restaura este item do histórico.
     pub undo: Option<i64>,
 }
 
-/// Estado do inspetor de formatos.
 #[derive(Default)]
 pub struct InspectorState {
     pub open: bool,
@@ -205,20 +179,16 @@ pub struct DownloadOperation {
     pub output_format: String,
     pub quality: String,
     pub source_file: PathBuf,
-    /// Progresso do download: `Some(0.0..=1.0)` ou `None` quando indeterminado.
     pub progress: Option<f32>,
-    /// Pré-visualização (canal, duração, resoluções, tamanho estimado).
     pub preview: Option<VideoPreview>,
-    /// Recorte por tempo (trim).
     pub clip_enabled: bool,
     pub clip_start: String,
     pub clip_end: String,
-    /// Resolução máxima escolhida (None = melhor).
     pub max_height: Option<u32>,
-    /// Preset de conversão de vídeo ("" = original, "compress", "720", ...).
     pub convert_preset: String,
-    /// Gravar live do início (yt-dlp --live-from-start).
     pub live_from_start: bool,
+    pub is_live: bool,
+    pub live_bytes: u64,
 }
 
 #[derive(Clone, PartialEq)]
@@ -242,7 +212,6 @@ impl App {
     pub fn new() -> Self {
         let config = Config::load();
         let db = Database::open(&config.db_path());
-        // Auto-limpeza: esvazia itens da lixeira com mais de 30 dias.
         db.purge_old_trash(30);
 
         let engine_holder: Arc<Mutex<Option<DownloadEngine>>> = Arc::new(Mutex::new(None));
@@ -267,12 +236,13 @@ impl App {
             max_height: None,
             convert_preset: String::new(),
             live_from_start: false,
+            is_live: false,
+            live_bytes: 0,
         }));
 
         let batch_format = config.video_format.clone();
         let batch_quality = config.quality.clone();
 
-        // Retoma a fila salva da sessão anterior.
         let mut queue = Queue::new();
         queue.load(&Self::queue_path());
 
@@ -346,10 +316,105 @@ impl App {
             style_set: false,
             update_checked: false,
             win_dirty: false,
+            mini: crate::player::MiniPlayer::default(),
+            gamepad: crate::gamepad::GamepadNav::default(),
+            gamepad_mode: false,
+            steam_in_game: false,
+            steam_forced_mode: false,
+            steam_last_check: std::time::Instant::now()
+                - std::time::Duration::from_secs(10),
+            gp_focus_applied: false,
+            live_stop: None,
+            live_started: None,
         }
     }
 
-    /// Remove arquivos temporários da pasta de download. Retorna a quantidade.
+    /// Sinaliza para a gravação de live parar e finalizar (remuxar o já baixado).
+    pub fn stop_live_recording(&mut self) {
+        let pt = self.config.lang == crate::ui::i18n::Lang::Pt;
+        let bytes = self.operation.lock().map(|o| o.live_bytes).unwrap_or(0);
+        if bytes == 0 {
+            self.toast(
+                if pt {
+                    "A gravação ainda não começou — aguarde o tamanho começar a subir."
+                } else {
+                    "Recording hasn't started yet — wait for the size to grow."
+                },
+                true,
+            );
+            return;
+        }
+        if let Some(flag) = &self.live_stop {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Ok(mut op) = self.operation.lock() {
+            op.phase = DownloadPhase::Downloading(if pt {
+                "Finalizando gravação...".to_string()
+            } else {
+                "Finalizing recording...".to_string()
+            });
+        }
+    }
+
+    /// Liga/desliga o Modo Games manualmente (botão PS).
+    pub fn toggle_gamepad_mode(&mut self) {
+        self.gamepad_mode = !self.gamepad_mode;
+        if self.gamepad_mode {
+            // Abre focado no Início (atalhos rápidos + baixados recentes).
+            self.active_tab = Tab::Home;
+        }
+        // Toggle manual cancela o controle automático da Steam.
+        self.steam_forced_mode = false;
+    }
+
+    /// Detecta jogo da Steam e liga/desliga o modo controle automaticamente.
+    fn poll_steam_mode(&mut self) {
+        if !self.config.gamepad_enabled {
+            return;
+        }
+        if self.steam_last_check.elapsed() < std::time::Duration::from_secs(3) {
+            return;
+        }
+        self.steam_last_check = std::time::Instant::now();
+        let in_game = crate::gamepad::steam_in_game();
+        if in_game && !self.steam_in_game && !self.gamepad_mode {
+            // Entrou num jogo → liga o Modo Games, focado no Início.
+            self.gamepad_mode = true;
+            self.active_tab = Tab::Home;
+            self.steam_forced_mode = true;
+        } else if !in_game && self.steam_in_game && self.steam_forced_mode {
+            // Saiu do jogo (e o modo tinha sido ligado pela Steam) → volta ao normal.
+            self.gamepad_mode = false;
+            self.steam_forced_mode = false;
+        }
+        self.steam_in_game = in_game;
+    }
+
+    /// Alterna a aba ativa (usado pelos gatilhos do controle).
+    pub fn cycle_tab(&mut self, delta: i32) {
+        const ORDER: [Tab; 12] = [
+            Tab::Home,
+            Tab::Music,
+            Tab::Video,
+            Tab::Converter,
+            Tab::Queue,
+            Tab::Folders,
+            Tab::Gallery,
+            Tab::Cloud,
+            Tab::Stats,
+            Tab::Achievements,
+            Tab::Settings,
+            Tab::Help,
+        ];
+        let n = ORDER.len() as i32;
+        let idx = ORDER
+            .iter()
+            .position(|t| *t == self.active_tab)
+            .unwrap_or(0) as i32;
+        let ni = (((idx + delta) % n) + n) % n;
+        self.active_tab = ORDER[ni as usize];
+    }
+
     pub fn clear_temp_files(&self) -> usize {
         let dir = &self.config.default_download_dir;
         let mut count = 0;
@@ -372,21 +437,17 @@ impl App {
         count
     }
 
-    /// Apaga as dependências baixadas (yt-dlp/ffmpeg/pdfium/whisper) para reinstalar.
     pub fn reinstall_dependencies(&mut self) {
         let libs = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("LumenDownloader")
             .join("libs");
         let _ = std::fs::remove_dir_all(&libs);
-        // Reinicia o motor para baixar tudo de novo.
         self.engine = None;
         *self.engine_holder.lock().unwrap() = None;
         self.engine_spawned.store(false, Ordering::Relaxed);
     }
 
-    /// Move downloads com mais de `days` dias para uma subpasta "Arquivo".
-    /// Retorna quantos arquivos foram movidos.
     pub fn archive_old(&self, days: i64) -> usize {
         let dest = self.config.default_download_dir.join("Arquivo");
         std::fs::create_dir_all(&dest).ok();
@@ -417,12 +478,10 @@ impl App {
         moved
     }
 
-    /// Adiciona um toast (notificação in-app).
     pub fn toast(&mut self, text: impl Into<String>, error: bool) {
         self.push_toast(text.into(), error, None);
     }
 
-    /// Toast com botão "Desfazer" que restaura um item do histórico.
     pub fn toast_undo(&mut self, text: impl Into<String>, history_id: i64) {
         self.push_toast(text.into(), false, Some(history_id));
     }
@@ -439,7 +498,6 @@ impl App {
         }
     }
 
-    /// Solicita a miniatura de um vídeo (gera com ffmpeg em background, com cache em disco).
     pub fn request_thumb(&mut self, file_path: &str) {
         if self.thumb_textures.contains_key(file_path)
             || self.thumb_inflight.contains(file_path)
@@ -450,7 +508,6 @@ impl App {
         if !src.is_file() {
             return;
         }
-        // Caminho de cache: data/thumbs/<hash>.jpg (inclui mtime p/ invalidar).
         let mtime = std::fs::metadata(src)
             .and_then(|m| m.modified())
             .ok()
@@ -465,7 +522,6 @@ impl App {
 
         self.thumb_inflight.insert(file_path.to_string());
 
-        // Já existe em cache: marca como pronto direto.
         if jpg.exists() {
             self.thumb_ready
                 .lock()
@@ -500,7 +556,6 @@ impl App {
             .join("thumbs")
     }
 
-    /// Carrega as miniaturas geradas em texturas (algumas por frame).
     fn load_ready_thumbs(&mut self, ctx: &egui::Context) {
         let ready: Vec<(String, PathBuf)> = {
             let mut r = self.thumb_ready.lock().unwrap();
@@ -522,8 +577,6 @@ impl App {
         }
     }
 
-    /// (Re)gera a pré-visualização da marca d'água se os parâmetros mudaram.
-    /// `sig` identifica vídeo+marca+posição+tamanho+opacidade.
     pub fn request_wm_preview(&mut self, sig: String) {
         if self.wm_preview_busy || sig == self.wm_preview_sig {
             return;
@@ -555,7 +608,6 @@ impl App {
         });
     }
 
-    /// Carrega a pré-visualização da marca d'água gerada em background.
     fn load_wm_preview(&mut self, ctx: &egui::Context) {
         let ready = self.wm_preview_ready.lock().unwrap().take();
         if let Some(jpg) = ready {
@@ -565,7 +617,6 @@ impl App {
         }
     }
 
-    /// Abre o editor de tags ID3 para um arquivo de áudio.
     pub fn open_tag_editor(&mut self, path: String) {
         let t = crate::download::engine::read_audio_tags(&path);
         self.tag_editor = Some(TagEditState {
@@ -575,7 +626,6 @@ impl App {
         });
     }
 
-    /// Grava as tags editadas no arquivo.
     pub fn save_tags(&mut self) {
         if let Some(ed) = &self.tag_editor {
             match crate::download::engine::write_audio_tags(&ed.path, &ed.t) {
@@ -586,7 +636,6 @@ impl App {
         self.tag_editor = None;
     }
 
-    /// Detecta o BPM do arquivo em edição (em background).
     pub fn detect_bpm_editor(&mut self) {
         let Some(ed) = self.tag_editor.as_mut() else {
             return;
@@ -618,7 +667,6 @@ impl App {
         }
     }
 
-    /// Exporta uma playlist .m3u8 com os itens informados (título, caminho).
     pub fn export_playlist(&mut self, entries: Vec<(String, String)>) {
         if entries.is_empty() {
             self.toast("Nada para exportar.", true);
@@ -644,7 +692,6 @@ impl App {
         }
     }
 
-    /// Atualiza (em background) as versões/estado das dependências.
     pub fn refresh_deps(&self) {
         let Some(eng) = self.engine.clone() else {
             return;
@@ -656,7 +703,6 @@ impl App {
         });
     }
 
-    /// Lê e exibe os metadados de um arquivo de mídia (janela de informação).
     pub fn show_metadata(&mut self, file: String) {
         let title = std::path::Path::new(&file)
             .file_name()
@@ -675,7 +721,6 @@ impl App {
         });
     }
 
-    /// Exporta uma lista de arquivos para um .zip escolhido pelo usuário.
     pub fn export_zip(&mut self, files: Vec<std::path::PathBuf>) {
         let pt = self.config.lang == crate::ui::i18n::Lang::Pt;
         let files: Vec<std::path::PathBuf> = files.into_iter().filter(|p| p.is_file()).collect();
@@ -732,7 +777,6 @@ impl App {
         });
     }
 
-    /// Verifica a integridade de um arquivo em segundo plano (toast com o resultado).
     pub fn verify_file(&mut self, path: String) {
         let pt = self.config.lang == crate::ui::i18n::Lang::Pt;
         let engine = self.engine.clone();
@@ -754,9 +798,7 @@ impl App {
         });
     }
 
-    /// Expira toasts antigos e dispara toasts ao concluir/falhar a operação atual.
     fn update_toasts(&mut self) {
-        // Drena toasts vindos de tarefas em segundo plano.
         let queued: Vec<(String, bool)> = {
             let mut q = self.toast_queue.lock().unwrap();
             std::mem::take(&mut *q)
@@ -792,7 +834,6 @@ impl App {
         }
     }
 
-    /// Cancela o download/processamento em andamento e volta ao estado ocioso.
     pub fn cancel_operation(&mut self) {
         if let Some(handle) = self.download_task.take() {
             handle.abort();
@@ -801,8 +842,6 @@ impl App {
         op.phase = DownloadPhase::Idle;
     }
 
-    /// Inicia o fluxo de download de uma URL (busca info → tela de configuração).
-    /// Usado pelas abas Música/Vídeo e pela ação "baixar de novo" do histórico.
     pub fn start_url_download(&mut self, url: String, media_type: MediaType) {
         let url = url.trim().to_string();
         if url.is_empty() {
@@ -819,10 +858,9 @@ impl App {
         let format = match media_type {
             MediaType::Music => self.config.music_format.clone(),
             MediaType::Video => self.config.video_format.clone(),
-            MediaType::Convert => return, // conversão não usa este fluxo
+            MediaType::Convert => return,
         };
 
-        // Guarda para "repetir último download".
         self.last_download = Some((url.clone(), media_type));
 
         {
@@ -845,7 +883,6 @@ impl App {
         self.download_task = Some(tokio::spawn(async move {
             match engine {
                 Some(ref eng) => {
-                    // Resolve fontes especiais (ex.: Spotify → busca no YouTube).
                     let url = eng.resolve_source(&url).await;
                     op_ref.lock().unwrap().url = url.clone();
                     match eng.fetch_preview(&url).await {
@@ -864,6 +901,7 @@ impl App {
                         );
                         let safe = crate::download::engine::sanitize_filename(&base);
                         op.file_name = format!("{}.{}", safe, op.output_format);
+                        op.is_live = preview.is_live;
                         op.preview = Some(preview);
                         op.phase = DownloadPhase::Configuring;
                     }
@@ -883,7 +921,6 @@ impl App {
         }));
     }
 
-    /// Procura arquivos de mídia na pasta de download que não estão no histórico.
     pub fn find_orphans(&mut self) {
         let known: std::collections::HashSet<String> = self
             .db
@@ -925,7 +962,6 @@ impl App {
         self.orphans = Some(found);
     }
 
-    /// Repete o último download (mesmo link e tipo).
     pub fn repeat_last_download(&mut self) {
         if let Some((url, mt)) = self.last_download.clone() {
             self.start_url_download(url, mt);
@@ -934,7 +970,6 @@ impl App {
         }
     }
 
-    /// Abre o inspetor de formatos para um link (lista resoluções/codecs/tamanhos).
     pub fn start_inspect(&mut self, url: String) {
         let url = url.trim().to_string();
         {
@@ -974,7 +1009,6 @@ impl App {
         });
     }
 
-    /// Baixa apenas a miniatura/capa de um link.
     pub fn start_url_thumbnail(&mut self, url: String) {
         let url = url.trim().to_string();
         if url.is_empty() {
@@ -1014,7 +1048,6 @@ impl App {
         }));
     }
 
-    /// Baixa o áudio de um link e gera a transcrição (.txt), sem passar pelo modal.
     pub fn start_url_transcribe(&mut self, url: String, media_type: MediaType) {
         let url = url.trim().to_string();
         if url.is_empty() {
@@ -1074,7 +1107,6 @@ impl App {
                 .unwrap_or_else(|_| "transcricao".to_string());
             op_ref.lock().unwrap().title = title.clone();
 
-            // Baixa apenas o áudio (temporário) para transcrever.
             let safe = crate::download::engine::sanitize_filename(&title);
             let tmp = folder.join(format!("{}.transcribe.m4a", safe));
             let opts = crate::download::engine::DownloadOptions {
@@ -1164,6 +1196,31 @@ impl App {
         crate::ui::theme::apply(ctx);
     }
 
+    pub fn setup_fonts(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        let mut added: Vec<String> = Vec::new();
+        let candidates = [
+            ("segoe_symbol", "C:/Windows/Fonts/seguisym.ttf"),
+            ("segoe_emoji", "C:/Windows/Fonts/seguiemj.ttf"),
+        ];
+        for (name, path) in candidates {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts
+                    .font_data
+                    .insert(name.to_string(), egui::FontData::from_owned(bytes));
+                added.push(name.to_string());
+            }
+        }
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            if let Some(list) = fonts.families.get_mut(&family) {
+                for name in &added {
+                    list.push(name.clone());
+                }
+            }
+        }
+        ctx.set_fonts(fonts);
+    }
+
     fn render_loading(&self, ctx: &egui::Context) {
         use crate::ui::theme;
         egui::CentralPanel::default()
@@ -1195,16 +1252,53 @@ impl App {
     }
 
     pub fn update(&mut self, ctx: &egui::Context) {
+        // Mantém frames rodando enquanto houver controle conectado, para que o
+        // polling do joystick (em raw_input_hook) funcione mesmo com a UI ociosa —
+        // inclusive na interface padrão (ex.: apertar PS para entrar no Modo Games).
+        if self.config.gamepad_enabled {
+            let ms = if self.gamepad.connected { 40 } else { 800 };
+            ctx.request_repaint_after(std::time::Duration::from_millis(ms));
+        }
+
+        // Reforça o indicador de foco quando o joystick está conectado.
+        let want_gp_focus = self.config.gamepad_enabled && self.gamepad.connected;
+        if want_gp_focus != self.gp_focus_applied {
+            self.gp_focus_applied = want_gp_focus;
+            crate::ui::theme::set_gamepad_focus(want_gp_focus);
+            self.restyle = true;
+        }
+
+        // Modo Games força layout compacto (mais minimalista), sem alterar a
+        // preferência do usuário; ao sair, volta ao valor configurado.
+        let want_compact = self.config.compact_ui || self.gamepad_mode;
+        if crate::ui::theme::is_compact() != want_compact {
+            crate::ui::theme::set_compact(want_compact);
+            self.restyle = true;
+        }
+
+        // Limpa o estado de gravação de live quando o download termina.
+        if self.live_started.is_some() {
+            let downloading = self
+                .operation
+                .lock()
+                .map(|o| matches!(o.phase, DownloadPhase::Downloading(_)))
+                .unwrap_or(false);
+            if !downloading {
+                self.live_stop = None;
+                self.live_started = None;
+            }
+        }
+
         if !self.style_set {
             crate::ui::theme::set_light(self.config.theme == crate::config::settings::Theme::Light);
             crate::ui::theme::set_high_contrast(self.config.high_contrast);
             crate::ui::theme::set_compact(self.config.compact_ui);
+            Self::setup_fonts(ctx);
             Self::setup_style(ctx);
             ctx.set_pixels_per_point(self.config.ui_scale.clamp(0.7, 2.0));
             self.style_set = true;
         }
 
-        // Reaplica o estilo quando o tema é alterado por um comando.
         if self.restyle {
             self.restyle = false;
             crate::ui::theme::set_light(self.config.theme == crate::config::settings::Theme::Light);
@@ -1230,7 +1324,6 @@ impl App {
             self.auto_update_ytdlp();
         }
 
-        // Processa a fila de downloads.
         if let Some(engine) = self.engine.clone() {
             let db_path = self.config.db_path();
             let subs = if self.config.subtitles {
@@ -1262,14 +1355,12 @@ impl App {
                 self.config.auto_retry,
             );
         }
-        // Persiste a fila quando muda (para retomar na próxima sessão).
         let sig = self.queue.signature();
         if sig != self.queue_sig {
             self.queue_sig = sig;
             self.queue.save(&Self::queue_path());
         }
 
-        // Lembra a última aba aberta.
         if self.active_tab.id() != self.config.last_tab {
             self.config.last_tab = self.active_tab.id().to_string();
             self.config.save();
@@ -1289,7 +1380,6 @@ impl App {
         dashboard::render(self, ctx);
     }
 
-    /// Atualiza o yt-dlp automaticamente se faz mais de 7 dias da última vez.
     fn auto_update_ytdlp(&mut self) {
         const WEEK: i64 = 7 * 24 * 60 * 60;
         let now = chrono::Utc::now().timestamp();
@@ -1299,7 +1389,6 @@ impl App {
         let Some(engine) = self.engine.clone() else {
             return;
         };
-        // Marca otimisticamente para não tentar de novo a cada inicialização.
         self.config.last_ytdlp_update = now;
         self.config.save();
 
@@ -1315,7 +1404,6 @@ impl App {
         });
     }
 
-    /// Arrastar e soltar: um arquivo solto vai para a aba Lumen Converter.
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
             i.raw
@@ -1330,19 +1418,16 @@ impl App {
         }
     }
 
-    /// Atalhos de teclado globais.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let mut new_tab: Option<Tab> = None;
         let mut escape = false;
 
-        // Ctrl+K abre/fecha a paleta de comandos.
         let toggle_palette =
             ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K));
         if toggle_palette {
             self.cmd_palette_open = !self.cmd_palette_open;
             self.cmd_query.clear();
         }
-        // Com a paleta aberta, Esc fecha e os demais atalhos ficam suspensos.
         if self.cmd_palette_open {
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.cmd_palette_open = false;
@@ -1350,13 +1435,11 @@ impl App {
             return;
         }
 
-        // F11: alterna o modo quiosque (tela cheia).
         if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
             self.fullscreen = !self.fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
         }
 
-        // Ctrl+Tab / Ctrl+Shift+Tab: cicla entre as abas (navegação por teclado).
         let (cycle_next, cycle_prev) = ctx.input(|i| {
             let t = i.modifiers.command && i.key_pressed(egui::Key::Tab);
             (t && !i.modifiers.shift, t && i.modifiers.shift)
@@ -1423,7 +1506,6 @@ impl App {
         }
     }
 
-    /// Observa a área de transferência e sugere baixar um link recém-copiado.
     fn check_clipboard(&mut self) {
         if self.clip_last_check.elapsed().as_millis() < 1200 {
             return;
@@ -1443,7 +1525,6 @@ impl App {
         }
     }
 
-    /// Persiste o tamanho da janela (salva no disco quando o redimensionamento termina).
     fn persist_window_size(&mut self, ctx: &egui::Context) {
         let size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
         if let Some(sz) = size {
@@ -1457,7 +1538,6 @@ impl App {
                 }
             }
         }
-        // Salva uma vez quando o usuário solta o mouse (fim do arraste).
         if self.win_dirty && !ctx.input(|i| i.pointer.any_down()) {
             self.config.save();
             self.win_dirty = false;
@@ -1467,11 +1547,69 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.mini.poll_finished();
+        self.poll_steam_mode();
         self.update(ctx);
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if !self.config.gamepad_enabled {
+            return;
+        }
+        // Mantém o polling do controle ativo mesmo com a UI ociosa.
+        ctx.request_repaint_after(std::time::Duration::from_millis(60));
+
+        use crate::gamepad::NavAction;
+        for action in self.gamepad.poll() {
+            match action {
+                NavAction::FocusNext => push_key(raw_input, egui::Key::Tab, false),
+                NavAction::FocusPrev => push_key(raw_input, egui::Key::Tab, true),
+                NavAction::ArrowLeft => push_key(raw_input, egui::Key::ArrowLeft, false),
+                NavAction::ArrowRight => push_key(raw_input, egui::Key::ArrowRight, false),
+                NavAction::Activate => {
+                    push_key(raw_input, egui::Key::Enter, false);
+                    push_key(raw_input, egui::Key::Space, false);
+                }
+                NavAction::Back => push_key(raw_input, egui::Key::Escape, false),
+                NavAction::NextTab => self.cycle_tab(1),
+                NavAction::PrevTab => self.cycle_tab(-1),
+                NavAction::PlayPause => {
+                    if self.mini.is_active() {
+                        self.mini.toggle();
+                    }
+                }
+                NavAction::Stop => self.mini.stop(),
+                NavAction::Palette => {
+                    self.cmd_palette_open = true;
+                    self.cmd_query.clear();
+                }
+                NavAction::ToggleMode => self.toggle_gamepad_mode(),
+            }
+        }
     }
 }
 
-/// Gera uma textura egui com o QR code de um texto (ex.: URL de origem).
+fn push_key(raw: &mut egui::RawInput, key: egui::Key, shift: bool) {
+    let modifiers = egui::Modifiers {
+        shift,
+        ..Default::default()
+    };
+    raw.events.push(egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    });
+    raw.events.push(egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers,
+    });
+}
+
 pub fn make_qr_texture(ctx: &egui::Context, data: &str) -> Option<egui::TextureHandle> {
     let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
     let modules = code.width();
@@ -1479,7 +1617,7 @@ pub fn make_qr_texture(ctx: &egui::Context, data: &str) -> Option<egui::TextureH
     let quiet = 4usize;
     let scale = 6usize;
     let dim = (modules + quiet * 2) * scale;
-    let mut rgba = vec![255u8; dim * dim * 4]; // fundo branco
+    let mut rgba = vec![255u8; dim * dim * 4];
     for y in 0..modules {
         for x in 0..modules {
             if colors[y * modules + x] == qrcode::Color::Dark {
@@ -1501,7 +1639,6 @@ pub fn make_qr_texture(ctx: &egui::Context, data: &str) -> Option<egui::TextureH
     Some(ctx.load_texture("qr_code", img, egui::TextureOptions::NEAREST))
 }
 
-/// Carrega o logo (logo + nome) embutido como textura egui.
 pub fn load_brand_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let bytes = include_bytes!("../assets/FULL LOGO LUMEN DOWLOADER PNG.png");
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
@@ -1510,7 +1647,6 @@ pub fn load_brand_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     Some(ctx.load_texture("brand_logo", color, egui::TextureOptions::LINEAR))
 }
 
-/// Carrega uma imagem do disco como textura egui (reduzida).
 pub fn load_texture_from_file(
     ctx: &egui::Context,
     path: &std::path::Path,

@@ -52,7 +52,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
                         == folder.path.as_str();
 
                     ui.horizontal(|ui| {
-                        // Nome (com edição inline quando em modo renomear).
                         let editing = matches!(&app.folder_edit, Some((id, _)) if *id == folder.id);
                         if editing {
                             if let Some((_, name)) = app.folder_edit.as_mut() {

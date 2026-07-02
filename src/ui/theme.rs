@@ -1,7 +1,3 @@
-//! Paleta de cores e helpers de UI inspirados no Lumen Music.
-//!
-//! As cores são funções para permitir alternar entre tema escuro e claro em
-//! tempo de execução.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -10,8 +6,16 @@ use egui::{Color32, FontId, Rounding, Stroke};
 static LIGHT: AtomicBool = AtomicBool::new(false);
 static HIGH_CONTRAST: AtomicBool = AtomicBool::new(false);
 static COMPACT: AtomicBool = AtomicBool::new(false);
+static GAMEPAD_FOCUS: AtomicBool = AtomicBool::new(false);
 
-/// Liga/desliga a densidade compacta da interface.
+pub fn set_gamepad_focus(on: bool) {
+    GAMEPAD_FOCUS.store(on, Ordering::Relaxed);
+}
+
+pub fn is_gamepad_focus() -> bool {
+    GAMEPAD_FOCUS.load(Ordering::Relaxed)
+}
+
 pub fn set_compact(c: bool) {
     COMPACT.store(c, Ordering::Relaxed);
 }
@@ -20,7 +24,6 @@ pub fn is_compact() -> bool {
     COMPACT.load(Ordering::Relaxed)
 }
 
-/// Define o tema atual (claro = `true`).
 pub fn set_light(light: bool) {
     LIGHT.store(light, Ordering::Relaxed);
 }
@@ -29,7 +32,6 @@ pub fn is_light() -> bool {
     LIGHT.load(Ordering::Relaxed)
 }
 
-/// Liga/desliga o modo de alto contraste (acessibilidade).
 pub fn set_high_contrast(hc: bool) {
     HIGH_CONTRAST.store(hc, Ordering::Relaxed);
 }
@@ -42,10 +44,6 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
-// --- Paleta oficial Lumen Downloader (derivada do logo: ciano da marca + ---
-// --- fundos carvão com leve tom frio/azulado). ---
-
-// --- Fundos em camadas ---
 pub fn bg_app() -> Color32 {
     if is_light() { rgb(0xf3, 0xf6, 0xf8) } else { rgb(0x0a, 0x0e, 0x12) }
 }
@@ -68,12 +66,11 @@ pub fn border() -> Color32 {
     if is_light() { rgb(0xd2, 0xdb, 0xe1) } else { rgb(0x26, 0x32, 0x40) }
 }
 
-// --- Acento (ciano da marca; mais vivo no escuro, mais profundo no claro) ---
 pub fn accent() -> Color32 {
     if is_light() {
-        rgb(0x0c, 0xa0, 0xc8) // ciano profundo (legível sobre claro)
+        rgb(0x0c, 0xa0, 0xc8)
     } else {
-        rgb(0x2f, 0xd0, 0xee) // ciano vivo (brilha sobre escuro, como o logo)
+        rgb(0x2f, 0xd0, 0xee)
     }
 }
 pub fn accent_soft() -> Color32 {
@@ -85,13 +82,11 @@ pub fn accent_soft() -> Color32 {
     }
 }
 
-/// Mistura `a` e `b` com fator `t` (0 = a, 1 = b).
 fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
     let m = |x: u8, y: u8| (x as f32 * (1.0 - t) + y as f32 * t) as u8;
     Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
 }
 
-// --- Texto (tons levemente frios para combinar com o ciano) ---
 pub fn text() -> Color32 {
     if is_hc() {
         return if is_light() { rgb(0x00, 0x00, 0x00) } else { rgb(0xff, 0xff, 0xff) };
@@ -117,7 +112,6 @@ pub fn danger() -> Color32 {
 
 pub const CARD_ROUNDING: f32 = 10.0;
 
-/// Aplica o tema global ao contexto egui.
 pub fn apply(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     let v = &mut style.visuals;
@@ -172,6 +166,16 @@ pub fn apply(ctx: &egui::Context) {
     w.active.fg_stroke = Stroke::new(1.0, text());
     w.active.rounding = Rounding::same(8.0);
 
+    // Com o joystick conectado, reforça o indicador de foco (o widget focado usa
+    // o visual "active"): borda grossa em destaque + leve expansão, para o usuário
+    // enxergar claramente por onde está navegando com o controle.
+    if is_gamepad_focus() {
+        w.active.bg_stroke = Stroke::new(3.0, accent());
+        w.active.expansion = 2.5;
+        w.hovered.bg_stroke = Stroke::new(2.5, accent());
+        w.hovered.expansion = 1.5;
+    }
+
     if is_compact() {
         style.spacing.item_spacing = egui::vec2(7.0, 6.0);
         style.spacing.button_padding = egui::vec2(10.0, 5.0);
@@ -185,7 +189,6 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
-/// Frame de cartão arredondado no tom de superfície.
 pub fn card_frame() -> egui::Frame {
     egui::Frame::none()
         .fill(bg_card())
@@ -194,46 +197,47 @@ pub fn card_frame() -> egui::Frame {
         .inner_margin(egui::Margin::same(18.0))
 }
 
-/// Botão de acento (laranja, texto branco), estilo "pill".
 pub fn accent_button(label: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(label.to_string()).color(Color32::WHITE).size(15.0))
         .fill(accent())
         .rounding(Rounding::same(8.0))
 }
 
-/// Botão secundário discreto.
 pub fn ghost_button(label: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(label.to_string()).color(text()).size(15.0))
         .fill(bg_card())
         .rounding(Rounding::same(8.0))
 }
 
-/// Lê o texto da área de transferência (para o botão "colar").
 pub fn paste_clipboard() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
-/// Escreve texto na área de transferência (para "copiar info/caminho").
 pub fn set_clipboard(text: &str) -> bool {
     arboard::Clipboard::new()
         .and_then(|mut c| c.set_text(text.to_string()))
         .is_ok()
 }
 
-/// Item de navegação da barra lateral, alinhado à esquerda com ícone.
-/// Retorna `true` quando clicado.
 pub fn nav_item(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> bool {
     let desired = egui::vec2(ui.available_width(), 46.0);
     let (rect, resp) = ui.allocate_exact_size(desired, egui::Sense::click());
 
+    let focused = resp.has_focus();
     let bg = if selected {
         accent_soft()
-    } else if resp.hovered() {
+    } else if resp.hovered() || focused {
         bg_card_hover()
     } else {
         Color32::TRANSPARENT
     };
     ui.painter().rect_filled(rect, Rounding::same(10.0), bg);
+
+    // Indicador de foco (navegação por joystick): contorno em destaque.
+    if focused && is_gamepad_focus() {
+        ui.painter()
+            .rect_stroke(rect, Rounding::same(10.0), Stroke::new(2.5, accent()));
+    }
 
     if selected {
         let bar = egui::Rect::from_min_size(
@@ -244,7 +248,6 @@ pub fn nav_item(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> b
     }
 
     let color = if selected { accent() } else { text() };
-    // Ícone maior + rótulo com fonte maior (estilo barra do X).
     ui.painter().text(
         egui::pos2(rect.min.x + 14.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -262,6 +265,9 @@ pub fn nav_item(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> b
 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if focused && resp.ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space)) {
+        return true;
     }
     resp.clicked()
 }

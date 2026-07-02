@@ -1,4 +1,5 @@
 use crate::app::{App, DownloadPhase, MediaType};
+use crate::config::settings::ConvertEngine;
 use crate::ui::theme;
 
 pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -17,7 +18,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     );
     ui.add_space(20.0);
 
-    // Cartão de entrada
     let mut pick = false;
     let mut multi_pdf = false;
     let mut batch_pick = false;
@@ -85,7 +85,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     ui.add_space(16.0);
     image_batch_card(app, ui);
 
-    // Painel de conversão em lote.
     if !app.batch_convert.is_empty() {
         ui.add_space(12.0);
         batch_panel(app, ui, s);
@@ -111,7 +110,6 @@ fn pick_and_configure(app: &mut App) {
     }
 }
 
-/// Seleciona vários arquivos (do mesmo tipo) para conversão em lote.
 fn pick_batch(app: &mut App) {
     use crate::download::engine::{categorize, output_formats};
     let Some(files) = rfd::FileDialog::new().pick_files() else {
@@ -120,7 +118,6 @@ fn pick_batch(app: &mut App) {
     if files.is_empty() {
         return;
     }
-    // Usa a categoria do primeiro arquivo para definir os formatos de saída.
     let formats = output_formats(categorize(&files[0]));
     if formats.is_empty() {
         let mut op = app.operation.lock().unwrap();
@@ -140,10 +137,10 @@ fn pick_batch(app: &mut App) {
     app.batch_convert = files;
 }
 
-/// Painel para escolher o formato e iniciar a conversão em lote.
 fn batch_panel(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
-    use crate::download::engine::{categorize, output_formats};
-    let formats = output_formats(categorize(&app.batch_convert[0]));
+    use crate::download::engine::{categorize, output_formats, FileCategory};
+    let category = categorize(&app.batch_convert[0]);
+    let formats = output_formats(category);
     let mut start = false;
     let mut cancel = false;
 
@@ -170,6 +167,25 @@ fn batch_panel(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
                 }
             }
         });
+        if category == FileCategory::Office {
+            ui.add_space(6.0);
+            let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
+            let eng = match app.config.convert_engine {
+                ConvertEngine::Auto => if pt { "Automático" } else { "Automatic" },
+                ConvertEngine::Rust => if pt { "Rust puro" } else { "Pure Rust" },
+                ConvertEngine::LibreOffice => "LibreOffice",
+                ConvertEngine::MsOffice => "MS Office",
+            };
+            ui.label(
+                egui::RichText::new(if pt {
+                    format!("⚙  Motor: {}  ·  troque em Configurações para mais fidelidade", eng)
+                } else {
+                    format!("⚙  Engine: {}  ·  change it in Settings for higher fidelity", eng)
+                })
+                .color(theme::text_faint())
+                .size(11.0),
+            );
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.add(theme::accent_button(s.batch_start)).clicked() {
@@ -193,6 +209,7 @@ fn start_batch_convert(app: &mut App) {
     let files = std::mem::take(&mut app.batch_convert);
     let format = app.batch_convert_format.clone();
     let engine = app.engine.clone();
+    let convert_engine = app.config.convert_engine;
     let op_state = app.operation.clone();
     let db = crate::db::database::Database::open(&app.config.db_path());
 
@@ -224,7 +241,13 @@ fn start_batch_convert(app: &mut App) {
                 .unwrap_or_else(|| "saida".to_string());
             let out = folder.join(format!("{}.{}", stem, format));
             match eng
-                .convert_file(&file.to_string_lossy(), &out.to_string_lossy(), &format, "")
+                .convert_file(
+                    &file.to_string_lossy(),
+                    &out.to_string_lossy(),
+                    &format,
+                    "",
+                    convert_engine,
+                )
                 .await
             {
                 Ok(p) => {
@@ -253,7 +276,6 @@ fn start_batch_convert(app: &mut App) {
     }));
 }
 
-/// Seleciona várias imagens e gera um único PDF multipágina.
 fn images_to_pdf_flow(app: &mut App) {
     let Some(files) = rfd::FileDialog::new()
         .add_filter("Imagens", &["jpg", "jpeg", "png", "webp", "bmp", "tiff", "gif"])
@@ -321,7 +343,6 @@ fn images_to_pdf_flow(app: &mut App) {
     }));
 }
 
-/// Extrai frames de um vídeo (gera imagens numa subpasta).
 fn extract_frames_flow(app: &mut App) {
     let Some(file) = rfd::FileDialog::new()
         .add_filter("Vídeo", &["mp4", "mkv", "webm", "avi", "mov", "flv", "m4v"])
@@ -368,7 +389,6 @@ fn extract_frames_flow(app: &mut App) {
     }));
 }
 
-/// Transcreve um áudio/vídeo para texto (Whisper, se instalado).
 fn transcribe_flow(app: &mut App) {
     let Some(file) = rfd::FileDialog::new()
         .add_filter(
@@ -419,7 +439,6 @@ fn transcribe_flow(app: &mut App) {
     }));
 }
 
-/// Configura o modal de conversão para um arquivo (usado pelo seletor e por drag & drop).
 pub fn configure_for_file(app: &mut App, picked: std::path::PathBuf) {
     use crate::download::engine::{categorize, output_formats};
 
@@ -439,7 +458,6 @@ pub fn configure_for_file(app: &mut App, picked: std::path::PathBuf) {
     let category = categorize(&picked);
     let formats = output_formats(category);
 
-    // Tipos sem conversão disponível.
     if formats.is_empty() {
         let mut op = app.operation.lock().unwrap();
         op.phase = DownloadPhase::Failed(format!(
@@ -449,7 +467,6 @@ pub fn configure_for_file(app: &mut App, picked: std::path::PathBuf) {
         return;
     }
 
-    // Formato de saída padrão: o primeiro da categoria diferente da origem.
     let default_format = formats
         .iter()
         .find(|f| **f != src_ext)
@@ -473,7 +490,6 @@ pub fn configure_for_file(app: &mut App, picked: std::path::PathBuf) {
     op.phase = DownloadPhase::Configuring;
 }
 
-/// Cartão de marca d'água: configura a imagem/posição/escala/opacidade e aplica num vídeo.
 fn watermark_card(app: &mut App, ui: &mut egui::Ui) {
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
     let mut pick_img = false;
@@ -510,7 +526,6 @@ fn watermark_card(app: &mut App, ui: &mut egui::Ui) {
             ui.label(egui::RichText::new(name).color(theme::text_faint()).size(12.0));
         });
 
-        // Pré-visualização da marca escolhida.
         if !app.config.watermark_path.trim().is_empty() {
             let key = std::path::PathBuf::from(&app.config.watermark_path);
             if !app.gallery_textures.contains_key(&key) {
@@ -561,7 +576,6 @@ fn watermark_card(app: &mut App, ui: &mut egui::Ui) {
         });
         ui.add_space(8.0);
 
-        // --- Pré-visualização: um quadro do vídeo já com a marca aplicada ---
         ui.separator();
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -596,7 +610,6 @@ fn watermark_card(app: &mut App, ui: &mut egui::Ui) {
                 app.config.watermark_scale,
                 app.config.watermark_opacity,
             );
-            // Regenera só quando o usuário não está arrastando (evita spam de ffmpeg).
             if !ui.input(|i| i.pointer.any_down()) {
                 app.request_wm_preview(sig);
             }
@@ -635,7 +648,6 @@ fn watermark_card(app: &mut App, ui: &mut egui::Ui) {
         let has_wm = !app.config.watermark_path.trim().is_empty();
         let has_video = app.wm_preview_video.is_some();
         ui.horizontal(|ui| {
-            // Confirma: aplica e salva no MESMO vídeo selecionado/pré-visualizado.
             let btn = theme::accent_button(if pt {
                 "✅ Aplicar e salvar"
             } else {
@@ -698,7 +710,6 @@ fn watermark_card(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Aplica a marca d'água em vários vídeos de uma vez (sequencial).
 fn watermark_batch_flow(app: &mut App) {
     let Some(videos) = rfd::FileDialog::new()
         .add_filter("Vídeo", &["mp4", "mkv", "webm", "avi", "mov"])
@@ -792,7 +803,6 @@ fn watermark_batch_flow(app: &mut App) {
 }
 
 fn watermark_flow(app: &mut App) {
-    // Usa o vídeo já selecionado/pré-visualizado.
     let Some(video) = app.wm_preview_video.clone() else {
         return;
     };
@@ -856,8 +866,6 @@ fn watermark_flow(app: &mut App) {
     }));
 }
 
-/// Cartão de ferramentas de PDF: juntar, separar e rotacionar.
-/// Cartão de conversão de imagens em lote (formato + redimensionar + comprimir).
 fn image_batch_card(app: &mut App, ui: &mut egui::Ui) {
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
     let mut run = false;
@@ -1040,7 +1048,6 @@ fn pdf_card(app: &mut App, ui: &mut egui::Ui) {
         pdf_compress_flow(app);
     }
 
-    // Diálogo de reordenação (pede a nova ordem das páginas).
     let mut apply: Option<(std::path::PathBuf, String)> = None;
     let mut cancel = false;
     if let Some((path, order)) = app.pdf_reorder.as_mut() {
@@ -1172,7 +1179,6 @@ fn pdf_rotate_flow(app: &mut App, degrees: i32) {
     });
 }
 
-/// Executa uma tarefa de PDF em segundo plano e reflete o resultado no modal.
 fn run_pdf_task<F>(app: &mut App, msg: &str, make: F)
 where
     F: FnOnce(
