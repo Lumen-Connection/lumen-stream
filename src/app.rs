@@ -59,6 +59,8 @@ pub struct App {
     pub fullscreen: bool,
     pub last_download: Option<(String, MediaType)>,
     pub pending_clear: Option<String>,
+    /// Confirmação de exclusão de um item do histórico: (id, título, caminho).
+    pub pending_delete: Option<(i64, String, String)>,
     queue_sig: u64,
     pub detached: Vec<Tab>,
     pub wm_preview_video: Option<PathBuf>,
@@ -295,6 +297,7 @@ impl App {
             fullscreen: false,
             last_download: None,
             pending_clear: None,
+            pending_delete: None,
             queue_sig: 0,
             detached: Vec::new(),
             wm_preview_video: None,
@@ -332,8 +335,18 @@ impl App {
     /// Sinaliza para a gravação de live parar e finalizar (remuxar o já baixado).
     pub fn stop_live_recording(&mut self) {
         let pt = self.config.lang == crate::ui::i18n::Lang::Pt;
-        let bytes = self.operation.lock().map(|o| o.live_bytes).unwrap_or(0);
-        if bytes == 0 {
+        let (bytes, folder, file_name) = self
+            .operation
+            .lock()
+            .map(|o| (o.live_bytes, o.folder_path.clone(), o.file_name.clone()))
+            .unwrap_or_default();
+        // Confere no disco (fonte da verdade) — o contador da UI pode atrasar.
+        let disk = std::path::Path::new(&file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|stem| crate::download::engine::part_bytes(&folder, stem))
+            .unwrap_or(0);
+        if bytes == 0 && disk == 0 {
             self.toast(
                 if pt {
                     "A gravação ainda não começou — aguarde o tamanho começar a subir."
@@ -484,6 +497,62 @@ impl App {
 
     pub fn toast_undo(&mut self, text: impl Into<String>, history_id: i64) {
         self.push_toast(text.into(), false, Some(history_id));
+    }
+
+    /// Remove um item do histórico. Se `delete_file`, move também o arquivo para a
+    /// Lixeira do sistema (recuperável); caso contrário, só o registro (com desfazer).
+    pub fn delete_history_item(&mut self, id: i64, path: &str, delete_file: bool) {
+        let pt = self.config.lang == crate::ui::i18n::Lang::Pt;
+        self.db.delete_history(id);
+        self.selected.remove(&id);
+        if !delete_file {
+            self.toast_undo(
+                if pt { "Movido para a lixeira" } else { "Moved to trash" },
+                id,
+            );
+            return;
+        }
+        let p = std::path::Path::new(path);
+        if !p.exists() {
+            self.toast_undo(
+                if pt {
+                    "Removido do histórico (arquivo não encontrado)"
+                } else {
+                    "Removed from history (file not found)"
+                },
+                id,
+            );
+            return;
+        }
+        // Preferir a Lixeira do SO (recuperável); só apagar de vez se falhar.
+        if trash::delete(p).is_ok() {
+            self.toast(
+                if pt {
+                    "🗑 Item e arquivo enviados para a Lixeira"
+                } else {
+                    "🗑 Item and file sent to the Recycle Bin"
+                },
+                false,
+            );
+        } else if std::fs::remove_file(p).is_ok() {
+            self.toast(
+                if pt {
+                    "🗑 Item e arquivo excluídos"
+                } else {
+                    "🗑 Item and file deleted"
+                },
+                false,
+            );
+        } else {
+            self.toast(
+                if pt {
+                    "Removido do histórico, mas não foi possível excluir o arquivo"
+                } else {
+                    "Removed from history, but the file could not be deleted"
+                },
+                true,
+            );
+        }
     }
 
     fn push_toast(&mut self, text: String, error: bool, undo: Option<i64>) {
@@ -835,11 +904,25 @@ impl App {
     }
 
     pub fn cancel_operation(&mut self) {
+        // Mata a árvore de processos (yt-dlp + ffmpeg) antes de abortar a task,
+        // senão o ffmpeg fica órfão e trava o fechamento do app.
+        if let Some(eng) = &self.engine {
+            eng.kill_downloads();
+        }
         if let Some(handle) = self.download_task.take() {
             handle.abort();
         }
-        let mut op = self.operation.lock().unwrap();
-        op.phase = DownloadPhase::Idle;
+        let (folder, file_name) = {
+            let mut op = self.operation.lock().unwrap();
+            op.phase = DownloadPhase::Idle;
+            (op.folder_path.clone(), op.file_name.clone())
+        };
+        // Limpa os temporários da gravação descartada.
+        if let Some(stem) = std::path::Path::new(&file_name).file_stem().and_then(|s| s.to_str()) {
+            crate::download::engine::cleanup_partials(&folder, stem);
+        }
+        self.live_stop = None;
+        self.live_started = None;
     }
 
     pub fn start_url_download(&mut self, url: String, media_type: MediaType) {
@@ -1550,6 +1633,14 @@ impl eframe::App for App {
         self.mini.poll_finished();
         self.poll_steam_mode();
         self.update(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Encerra downloads/gravações em andamento (mata yt-dlp + ffmpeg filhos),
+        // senão processos órfãos seguram os pipes e travam o encerramento do app.
+        if let Some(eng) = &self.engine {
+            eng.kill_downloads();
+        }
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {

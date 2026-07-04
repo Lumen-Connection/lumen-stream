@@ -291,11 +291,11 @@ pub fn render(
                                                     }
                                                 }
                                                 if icon_button(ui, "✕", tt("Excluir", "Delete")) {
-                                                    app.db.delete_history(entry.id);
-                                                    app.toast_undo(
-                                                        tt("Movido para a lixeira", "Moved to trash"),
+                                                    app.pending_delete = Some((
                                                         entry.id,
-                                                    );
+                                                        entry.title.clone(),
+                                                        entry.file_path.clone(),
+                                                    ));
                                                 }
                                                 let star = if entry.favorite { "★" } else { "☆" };
                                                 let star_col = if entry.favorite {
@@ -565,8 +565,11 @@ pub fn render(
                                                 }
                                             });
                                             if icon_button(ui, "✕", tt("Excluir", "Delete")) {
-                                                app.db.delete_history(entry.id);
-                                                app.toast_undo(tt("Movido para a lixeira", "Moved to trash"), entry.id);
+                                                app.pending_delete = Some((
+                                                    entry.id,
+                                                    entry.title.clone(),
+                                                    entry.file_path.clone(),
+                                                ));
                                             }
                                             if icon_button(ui, "📁", tt("Abrir pasta", "Open folder")) {
                                                 if let Some(parent) = std::path::Path::new(&entry.file_path).parent() {
@@ -605,20 +608,42 @@ pub fn render(
                 app.db.empty_trash(media_type);
             }
             ui.add_space(6.0);
-            for entry in &trash {
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        egui::vec2(360.0, 18.0),
-                        egui::Label::new(
-                            egui::RichText::new(&entry.title)
-                                .color(theme::text_faint())
-                                .size(12.0),
-                        ),
-                    );
-                    if icon_button(ui, "⟲", s.trash_restore) {
-                        app.db.restore_history(entry.id);
-                    }
-                });
+            for (idx, entry) in trash.iter().enumerate() {
+                let stripe = if idx % 2 == 1 {
+                    theme::bg_card_hover()
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                egui::Frame::none()
+                    .fill(stripe)
+                    .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+                    .rounding(egui::Rounding::same(4.0))
+                    .show(ui, |ui| {
+                        let w = ui.available_width();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(w, 26.0),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if icon_button(ui, "⟲", s.trash_restore) {
+                                    app.db.restore_history(entry.id);
+                                }
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&entry.title)
+                                                    .color(theme::text_faint())
+                                                    .size(12.0),
+                                            )
+                                            .truncate(true),
+                                        )
+                                        .on_hover_text(&entry.title);
+                                    },
+                                );
+                            },
+                        );
+                    });
             }
         });
     }

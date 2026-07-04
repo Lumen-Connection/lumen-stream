@@ -45,6 +45,8 @@ qrcode = { version = "0.14", default-features = false }
 lofty = "0.23"
 # leitura de planilhas (xlsx/xls/ods) p/ conversão nativa em PDF, sem LibreOffice
 calamine = "0.26"
+# exclusão segura de arquivos: move p/ a Lixeira (recuperável) em vez de apagar
+trash = "5"
 # mini-player de áudio (pré-ouvir o baixado)
 rodio = { version = "0.19", default-features = false, features = ["symphonia-all"] }
 # suporte a controle/joystick (DualSense etc.) para navegação

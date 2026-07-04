@@ -187,6 +187,9 @@ pub struct DownloadEngine {
     libs_dir: PathBuf,
     preview_cache: Mutex<HashMap<String, VideoPreview>>,
     net: Mutex<NetStats>,
+    /// PIDs dos yt-dlp em andamento — para matar a árvore (yt-dlp + ffmpeg filho)
+    /// ao cancelar/parar/fechar, evitando processos órfãos que travam o app.
+    dl_pids: Mutex<Vec<u32>>,
 }
 
 fn binary_path(dir: &PathBuf, name: &str) -> PathBuf {
@@ -226,12 +229,22 @@ impl DownloadEngine {
             libs_dir,
             preview_cache: Mutex::new(HashMap::new()),
             net: Mutex::new(NetStats::default()),
+            dl_pids: Mutex::new(Vec::new()),
         })
     }
 
     pub fn net_stats(&self) -> (f32, Vec<f32>) {
         let n = self.net.lock().unwrap();
         (n.current, n.history.clone())
+    }
+
+    /// Mata todos os downloads em andamento e suas árvores (yt-dlp + ffmpeg).
+    /// Usado ao cancelar e ao fechar o app, evitando processos órfãos.
+    pub fn kill_downloads(&self) {
+        let pids: Vec<u32> = std::mem::take(&mut *self.dl_pids.lock().unwrap());
+        for pid in pids {
+            kill_tree(pid);
+        }
     }
 
     pub async fn resolve_source(&self, url: &str) -> String {
@@ -700,6 +713,10 @@ impl DownloadEngine {
             cmd.creation_flags(0x08000000);
 
             let mut child = cmd.spawn()?;
+            let child_pid = child.id();
+            if let Some(pid) = child_pid {
+                self.dl_pids.lock().unwrap().push(pid);
+            }
             let stdout = child.stdout.take().ok_or("falha ao capturar saída do yt-dlp")?;
             let stderr = child.stderr.take().ok_or("falha ao capturar erros do yt-dlp")?;
 
@@ -721,6 +738,10 @@ impl DownloadEngine {
                 (0.0f64, 0.0f64, 0u64, 0u64);
             let stop = opts.stop.clone();
             let mut stopped = false;
+            // Em live, o yt-dlp entrega ao ffmpeg (progresso vai pro stderr, não pra
+            // cá) — então lemos o tamanho direto dos .part no disco, num tick.
+            let mut tick = tokio::time::interval(Duration::from_millis(500));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     line = lines.next_line() => {
@@ -757,8 +778,34 @@ impl DownloadEngine {
                             });
                         }
                     }
+                    _ = tick.tick() => {
+                        let bytes = part_bytes(&folder, &stem);
+                        if bytes != last_bytes {
+                            let delta = bytes.saturating_sub(last_bytes) as f64 / 0.5;
+                            last_bytes = bytes;
+                            last_speed = delta;
+                            {
+                                let mut n = self.net.lock().unwrap();
+                                n.current = delta as f32;
+                                n.history.push(delta as f32);
+                                if n.history.len() > 160 {
+                                    n.history.remove(0);
+                                }
+                            }
+                            on_progress(Progress {
+                                fraction: last_frac,
+                                speed_bps: last_speed,
+                                eta_secs: last_eta,
+                                downloaded_bytes: last_bytes,
+                            });
+                        }
+                    }
                     _ = wait_for_stop(&stop) => {
                         stopped = true;
+                        // Mata a árvore (yt-dlp + ffmpeg filho), senão o ffmpeg fica órfão.
+                        if let Some(pid) = child_pid {
+                            kill_tree(pid);
+                        }
                         let _ = child.start_kill();
                         break;
                     }
@@ -766,6 +813,9 @@ impl DownloadEngine {
             }
             {
                 self.net.lock().unwrap().current = 0.0;
+            }
+            if let Some(pid) = child_pid {
+                self.dl_pids.lock().unwrap().retain(|p| *p != pid);
             }
 
             // Parada graciosa de gravação: mata o yt-dlp e remuxa o que já baixou.
@@ -796,6 +846,17 @@ impl DownloadEngine {
 
             last_err = stderr_text;
             crate::applog::error(&format!("download falhou (tentativa {}): {}", attempt + 1, last_err.lines().last().unwrap_or("")));
+
+            // Live que caiu no meio da gravação: em vez de re-tentar (e arriscar
+            // sobrescrever horas já gravadas), finaliza o que está no disco.
+            if opts.is_live && part_bytes(&folder, &stem) > 0 {
+                if let Some(p) = self.finalize_live_partials(&folder, &stem, &final_ext).await {
+                    crate::applog::info("live caiu; gravação parcial finalizada");
+                    on_progress(Progress { fraction: 1.0, ..Default::default() });
+                    return Ok(p);
+                }
+            }
+
             if attempt + 1 < MAX_ATTEMPTS {
                 tokio::time::sleep(Duration::from_secs(2 * (attempt as u64 + 1))).await;
             }
@@ -995,6 +1056,20 @@ impl DownloadEngine {
                 .join(", ")
         ));
 
+        // Ignora .part vazios (placeholders) e compara com o total dos fragmentos
+        // ".part-FragN" do modo DVR — usa o caminho que realmente contém os dados
+        // (um placeholder de 0 bytes não pode vencer horas de fragmentos).
+        parts.retain(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false));
+        let main_total: u64 = parts
+            .iter()
+            .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .sum();
+        if frag_bytes(folder, stem) > main_total {
+            let frag_parts = concat_frag_groups(folder, stem).await;
+            if !frag_parts.is_empty() {
+                parts = frag_parts;
+            }
+        }
         if parts.is_empty() {
             return None;
         }
@@ -1028,7 +1103,15 @@ impl DownloadEngine {
             }
         };
 
-        cleanup_partials(folder, stem);
+        // Sucesso exige arquivo com conteúdo — nunca reportar um 0-byte como salvo.
+        let result = result
+            .filter(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false));
+
+        // Só limpa os temporários após sucesso real; numa falha eles são a única
+        // cópia dos dados e permitem recuperação manual.
+        if result.is_some() {
+            cleanup_partials(folder, stem);
+        }
         result
     }
 
@@ -2364,7 +2447,10 @@ pub fn cleanup_partials(folder: &Path, stem: &str) {
                 .extension()
                 .map(|e| e.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
-            let is_temp_ext = matches!(ext.as_str(), "part" | "ytdl" | "temp" | "rawaudio");
+            // "ext" está em minúsculas — o sufixo dos fragmentos ("...part-FragN")
+            // precisa ser comparado também em minúsculas.
+            let is_temp_ext = matches!(ext.as_str(), "part" | "ytdl" | "temp" | "rawaudio" | "recseg")
+                || ext.starts_with("part-frag");
             if name.starts_with(stem) && is_temp_ext {
                 let _ = std::fs::remove_file(&path);
             }
@@ -2469,8 +2555,20 @@ pub fn format_size(bytes: i64) -> String {
     }
 }
 
+/// Remove o prefixo de índice de formato ("1: [download] ...") que o yt-dlp usa
+/// quando baixa dois formatos em paralelo (ex.: live DVR com vídeo+áudio).
+fn strip_format_index(line: &str) -> &str {
+    let t = line.trim_start();
+    if let Some((idx, rest)) = t.split_once(": ") {
+        if !idx.is_empty() && idx.len() <= 3 && idx.chars().all(|c| c.is_ascii_digit()) {
+            return rest.trim_start();
+        }
+    }
+    t
+}
+
 fn parse_ytdlp_percent(line: &str) -> Option<f64> {
-    let l = line.trim_start();
+    let l = strip_format_index(line);
     if !l.starts_with("[download]") {
         return None;
     }
@@ -2483,7 +2581,7 @@ fn parse_ytdlp_percent(line: &str) -> Option<f64> {
 }
 
 fn parse_ytdlp_speed(line: &str) -> Option<f64> {
-    let l = line.trim_start();
+    let l = strip_format_index(line);
     if !l.starts_with("[download]") {
         return None;
     }
@@ -2506,7 +2604,7 @@ fn parse_ytdlp_speed(line: &str) -> Option<f64> {
 }
 
 fn parse_ytdlp_eta(line: &str) -> Option<u64> {
-    let l = line.trim_start();
+    let l = strip_format_index(line);
     if !l.starts_with("[download]") {
         return None;
     }
@@ -2527,7 +2625,7 @@ fn parse_ytdlp_eta(line: &str) -> Option<u64> {
 
 /// Extrai o total baixado de uma linha do yt-dlp (ex.: "[download]  30.56MiB at ...").
 fn parse_ytdlp_size(line: &str) -> Option<u64> {
-    let l = line.trim_start();
+    let l = strip_format_index(line);
     if !l.starts_with("[download]") {
         return None;
     }
@@ -2548,6 +2646,138 @@ fn parse_ytdlp_size(line: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// Total de bytes nos fragmentos ".part-FragN" completos de uma gravação DVR.
+fn frag_bytes(folder: &Path, stem: &str) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(folder) {
+        for entry in rd.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(stem)
+                    && name.contains(".part-Frag")
+                    && !name.ends_with(".part")
+                {
+                    total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Concatena os fragmentos ".part-FragN" de cada formato (ex.: f136 vídeo, f140
+/// áudio) em arquivos contínuos, em ordem numérica. Retorna os arquivos gerados,
+/// do maior (vídeo) para o menor (áudio). Método validado: fmp4 do YouTube
+/// concatenado assim remuxa num mp4 íntegro.
+async fn concat_frag_groups(folder: &Path, stem: &str) -> Vec<PathBuf> {
+    let folder = folder.to_path_buf();
+    let stem = stem.to_string();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut groups: HashMap<String, Vec<(u64, PathBuf)>> = HashMap::new();
+        let Ok(rd) = std::fs::read_dir(&folder) else {
+            return Vec::new();
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // Ignora o frag em trânsito (ainda .part no fim), que pode estar truncado.
+            if !name.starts_with(&stem) || name.ends_with(".part") {
+                continue;
+            }
+            let Some(pos) = name.find(".part-Frag") else {
+                continue;
+            };
+            let Ok(num) = name[pos + ".part-Frag".len()..].parse::<u64>() else {
+                continue;
+            };
+            groups
+                .entry(name[..pos].to_string())
+                .or_default()
+                .push((num, path));
+        }
+        let mut outs: Vec<(u64, PathBuf)> = Vec::new();
+        for (key, mut frags) in groups {
+            frags.sort_by_key(|(n, _)| *n);
+            let dest = folder.join(format!("{}.recseg", key));
+            let Ok(f) = std::fs::File::create(&dest) else {
+                continue;
+            };
+            let mut w = std::io::BufWriter::new(f);
+            let mut total = 0u64;
+            for (_, p) in &frags {
+                if let Ok(bytes) = std::fs::read(p) {
+                    total += bytes.len() as u64;
+                    if w.write_all(&bytes).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = w.flush();
+            if total > 0 {
+                outs.push((total, dest));
+            } else {
+                let _ = std::fs::remove_file(&dest);
+            }
+        }
+        outs.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+        outs.into_iter().map(|(_, p)| p).collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Mata um processo e toda a sua árvore de filhos (ex.: yt-dlp + ffmpeg).
+fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/T", "/PID", &pid.to_string()]);
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+        let _ = cmd.output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
+}
+
+/// Soma o que a gravação já escreveu no disco: `.part` e também os fragmentos
+/// `.part-FragN` que o modo DVR (--live-from-start) mantém separados até o fim.
+///
+/// Nota Windows/NTFS: enquanto o ffmpeg mantém o arquivo aberto, o tamanho na
+/// entrada do diretório fica defasado (o Explorer mostra 0 KB!). Por isso, para
+/// os `.part` principais o tamanho é lido do handle (File::open + metadata),
+/// que reflete o valor real; fragmentos já fechados usam a entrada do diretório.
+pub fn part_bytes(folder: &Path, stem: &str) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(folder) {
+        for entry in rd.flatten() {
+            let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                continue;
+            };
+            if !name.starts_with(stem) || !name.contains(".part") {
+                continue;
+            }
+            let dir_len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let main_part = name.ends_with(".part") && !name.contains("-Frag");
+            total += if main_part || dir_len == 0 {
+                std::fs::File::open(entry.path())
+                    .and_then(|f| f.metadata())
+                    .map(|m| m.len())
+                    .unwrap_or(dir_len)
+            } else {
+                dir_len
+            };
+        }
+    }
+    total
 }
 
 /// Aguarda até a flag de parada ser acionada; se não houver flag, nunca resolve.

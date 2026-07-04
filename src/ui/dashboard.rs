@@ -58,6 +58,7 @@ fn render_overlays(app: &mut App, ctx: &egui::Context) {
     render_tag_editor(app, ctx);
     render_tags_dialog(app, ctx);
     render_confirm_clear(app, ctx);
+    render_confirm_delete(app, ctx);
     render_orphans(app, ctx);
     render_onboarding(app, ctx);
     render_detached(app, ctx);
@@ -227,6 +228,87 @@ fn render_confirm_clear(app: &mut App, ctx: &egui::Context) {
         app.pending_clear = None;
     } else if cancel {
         app.pending_clear = None;
+    }
+}
+
+fn render_confirm_delete(app: &mut App, ctx: &egui::Context) {
+    let Some((id, title, path)) = app.pending_delete.clone() else {
+        return;
+    };
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
+    let file_exists = std::path::Path::new(&path).exists();
+    let short = crate::ui::music_tab::short_link(&title);
+
+    let mut action: Option<bool> = None; // Some(true)=com arquivo, Some(false)=só histórico
+    let mut cancel = false;
+    egui::Window::new(if pt { "Excluir item?" } else { "Delete item?" })
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(380.0)
+        .show(ctx, |ui| {
+            ui.set_max_width(400.0);
+            ui.label(
+                egui::RichText::new(short)
+                    .color(theme::text())
+                    .strong(),
+            );
+            ui.add_space(6.0);
+            if file_exists {
+                ui.label(
+                    egui::RichText::new(if pt {
+                        "⚠ Excluir também apaga o arquivo do disco (vai para a Lixeira do sistema, recuperável)."
+                    } else {
+                        "⚠ Deleting also removes the file from disk (moved to the system Recycle Bin, recoverable)."
+                    })
+                    .color(theme::danger()),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(if pt {
+                        "O arquivo não está mais na pasta; só o registro será removido."
+                    } else {
+                        "The file is no longer in the folder; only the entry will be removed."
+                    })
+                    .color(theme::text_muted()),
+                );
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if file_exists {
+                    if ui
+                        .add(theme::accent_button(if pt {
+                            "🗑 Excluir item e arquivo"
+                        } else {
+                            "🗑 Delete item and file"
+                        }))
+                        .clicked()
+                    {
+                        action = Some(true);
+                    }
+                    if ui
+                        .add(theme::ghost_button(if pt { "Só do histórico" } else { "History only" }))
+                        .clicked()
+                    {
+                        action = Some(false);
+                    }
+                } else if ui
+                    .add(theme::accent_button(if pt { "Excluir" } else { "Delete" }))
+                    .clicked()
+                {
+                    action = Some(false);
+                }
+                if ui.add(theme::ghost_button(if pt { "Cancelar" } else { "Cancel" })).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if let Some(with_file) = action {
+        app.delete_history_item(id, &path, with_file);
+        app.pending_delete = None;
+    } else if cancel {
+        app.pending_delete = None;
     }
 }
 
@@ -1886,7 +1968,16 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 .strong(),
                             );
                             ui.add_space(2.0);
-                            ui.label(msg.as_str());
+                            let sub = if msg.contains("Finaliz") || msg.contains("Finali") {
+                                msg.clone()
+                            } else if live_bytes == 0 {
+                                if pt { "Conectando à live...".to_string() } else { "Connecting to live...".to_string() }
+                            } else if pt {
+                                "Gravando — clique em Parar quando quiser".to_string()
+                            } else {
+                                "Recording — click Stop whenever you want".to_string()
+                            };
+                            ui.label(sub);
                             ui.add(
                                 egui::ProgressBar::new(0.0)
                                     .fill(theme::danger())
