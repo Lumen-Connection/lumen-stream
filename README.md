@@ -6,7 +6,7 @@
 
 Video and audio from every site `yt-dlp` supports, a resumable download queue, native PDF conversion, and a local library — all through a single, clean, extremely lightweight interface.
 
-![Rust](https://img.shields.io/badge/Rust-2021-CE422B?logo=rust&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-2024-CE422B?logo=rust&logoColor=white)
 ![egui](https://img.shields.io/badge/egui%20%2F%20eframe-0.27-FF5722)
 ![Windows](https://img.shields.io/badge/Windows-x64-0078D6?logo=windows&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-local-003B57?logo=sqlite&logoColor=white)
@@ -56,7 +56,7 @@ low memory use.
 
 ## Tech stack
 
-- **Language:** Rust (2021 edition)
+- **Language:** Rust (2024 edition)
 - **UI:** egui / eframe (immediate mode)
 - **Storage:** SQLite (local database) + JSON config
 - **Media:** `yt-dlp` + `ffmpeg`, fetched on demand on first use
