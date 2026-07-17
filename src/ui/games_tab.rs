@@ -7,20 +7,14 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let s = crate::ui::i18n::s(app.config.lang);
     let pt = app.config.lang == Lang::Pt;
 
-    ui.label(
-        egui::RichText::new(s.nav_games)
-            .color(theme::text())
-            .size(30.0)
-            .strong(),
-    );
-    ui.label(
-        egui::RichText::new(if pt {
+    theme::page_header(
+        ui,
+        s.nav_games,
+        if pt {
             "Insere as músicas baixadas na pasta que o jogo lê como rádio personalizado."
         } else {
             "Drops your downloaded music into the folder the game reads as a custom radio."
-        })
-        .color(theme::text_muted())
-        .size(14.0),
+        },
     );
     ui.add_space(20.0);
 
@@ -42,32 +36,51 @@ fn render_game_grid(app: &mut App, ui: &mut egui::Ui, pt: bool) {
                         .size(18.0)
                         .strong(),
                 );
-                let dirs = games::gtav_user_music_dirs();
-                let exists = dirs.iter().any(|d| d.exists());
-                let path_txt = dirs
-                    .first()
-                    .map(|d| d.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "—".to_string());
-                ui.label(
-                    egui::RichText::new(path_txt)
+                // No Linux o GTA V roda via Proton e não lê Documentos/Rockstar
+                // Games do sistema — a sincronização só funciona no Windows.
+                let on_linux = cfg!(target_os = "linux");
+                if on_linux {
+                    ui.label(
+                        egui::RichText::new(if pt {
+                            "Funcionalidade exclusiva do Windows — indisponível no Linux."
+                        } else {
+                            "Windows-only feature — unavailable on Linux."
+                        })
                         .color(theme::text_muted())
                         .size(11.0),
-                );
-                ui.label(
-                    egui::RichText::new(if exists {
-                        if pt { "Pasta encontrada." } else { "Folder found." }
-                    } else if pt {
-                        "Pasta ainda não existe — será criada ao sincronizar."
-                    } else {
-                        "Folder doesn't exist yet — it'll be created on sync."
-                    })
-                    .color(if exists { theme::accent() } else { theme::text_muted() })
-                    .size(11.0),
-                );
+                    );
+                } else {
+                    let dirs = games::gtav_user_music_dirs();
+                    let exists = dirs.iter().any(|d| d.exists());
+                    let path_txt = dirs
+                        .first()
+                        .map(|d| d.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "—".to_string());
+                    ui.label(
+                        egui::RichText::new(path_txt)
+                            .color(theme::text_muted())
+                            .size(11.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(if exists {
+                            if pt { "Pasta encontrada." } else { "Folder found." }
+                        } else if pt {
+                            "Pasta ainda não existe — será criada ao sincronizar."
+                        } else {
+                            "Folder doesn't exist yet — it'll be created on sync."
+                        })
+                        .color(if exists { theme::accent() } else { theme::text_muted() })
+                        .size(11.0),
+                    );
+                }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let on_linux = cfg!(target_os = "linux");
                 if ui
-                    .add(theme::accent_button(if pt { "Abrir" } else { "Open" }))
+                    .add_enabled(
+                        !on_linux,
+                        theme::accent_button(if pt { "Abrir" } else { "Open" }),
+                    )
                     .clicked()
                 {
                     app.selected_game = Some(GameTarget::GtaV);
@@ -104,7 +117,6 @@ fn render_gtav(app: &mut App, ui: &mut egui::Ui, pt: bool) {
         return;
     }
 
-    // Seleção rápida.
     ui.horizontal(|ui| {
         if ui
             .add(theme::ghost_button(if pt { "Selecionar todas" } else { "Select all" }))

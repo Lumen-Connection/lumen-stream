@@ -6,17 +6,7 @@ use crate::ui::theme;
 pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     let s = crate::ui::i18n::s(app.config.lang);
 
-    ui.label(
-        egui::RichText::new(s.settings_title)
-            .color(theme::text())
-            .size(30.0)
-            .strong(),
-    );
-    ui.label(
-        egui::RichText::new(s.settings_subtitle)
-            .color(theme::text_muted())
-            .size(14.0),
-    );
+    theme::page_header(ui, s.settings_title, s.settings_subtitle);
     ui.add_space(20.0);
 
     let mut changed = false;
@@ -24,27 +14,27 @@ pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     let ncols = if ui.available_width() > 980.0 { 2 } else { 1 };
     let right_idx = if ncols == 2 { 1 } else { 0 };
 
-    // Grade alinhada por linhas: cada par de cartões abre `ui.columns` próprio,
-    // então ambos começam na mesma altura (mesma linha horizontal) e ficam nas
-    // mesmas colunas (mesma linha vertical). As alturas podem diferir — é a
-    // "assimetria" aceitável entre um cartão e outro da mesma linha.
+    // Cada coluna flui por conta própria, e não em linhas casadas: um cartão
+    // começa logo abaixo do anterior *da mesma coluna*. Alinhar por linhas faria
+    // a coluna toda esperar pelo cartão mais alto da linha, abrindo um vão morto
+    // embaixo do mais baixo (Idioma/Tema vs. Organizar).
     ui.columns(ncols, |cols| {
-        card_language_theme(&mut cols[0], app, &mut changed);
-        card_organize(&mut cols[right_idx], app, &mut changed);
-    });
-    ui.add_space(16.0);
-    ui.columns(ncols, |cols| {
-        card_accessibility(&mut cols[0], app, &mut changed);
-        card_convert_engine(&mut cols[right_idx], app, &mut changed);
-    });
-    ui.add_space(16.0);
-    ui.columns(ncols, |cols| {
-        card_defaults(&mut cols[0], app, &mut changed);
-        card_maintenance(&mut cols[right_idx], app, &mut changed);
-    });
-    ui.add_space(16.0);
-    ui.columns(ncols, |cols| {
-        card_profiles(&mut cols[0], app, &mut changed);
+        let left = &mut cols[0];
+        card_language_theme(left, app, &mut changed);
+        left.add_space(16.0);
+        card_accessibility(left, app, &mut changed);
+        left.add_space(16.0);
+        card_defaults(left, app, &mut changed);
+
+        let right = &mut cols[right_idx];
+        if ncols == 1 {
+            right.add_space(16.0);
+        }
+        card_organize(right, app, &mut changed);
+        right.add_space(16.0);
+        card_convert_engine(right, app, &mut changed);
+        right.add_space(16.0);
+        card_maintenance(right, app, &mut changed);
     });
 
     ui.add_space(24.0);
@@ -314,83 +304,6 @@ fn card_defaults(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
     });
 }
 
-fn card_profiles(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
-    let pt = app.config.lang == Lang::Pt;
-    theme::card_frame().show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        ui.label(
-            egui::RichText::new(if pt { "Perfis de download" } else { "Download profiles" })
-                .color(theme::text_muted())
-                .size(11.0)
-                .strong(),
-        );
-        ui.label(
-            egui::RichText::new(if pt {
-                "Presets de formato/qualidade aplicáveis no modal de download."
-            } else {
-                "Format/quality presets you can apply in the download dialog."
-            })
-            .color(theme::text_faint())
-            .size(11.0),
-        );
-        ui.add_space(8.0);
-        let mut remove: Option<usize> = None;
-        for (i, p) in app.config.profiles.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{}  ·  {}  ·  {}/{}",
-                        p.name, p.media_type, p.format, p.quality
-                    ))
-                    .color(theme::text())
-                    .size(12.0),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(theme::ghost_button("✕")).clicked() {
-                        remove = Some(i);
-                    }
-                });
-            });
-        }
-        if let Some(i) = remove {
-            app.config.profiles.remove(i);
-            *changed = true;
-        }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut app.profile_draft.name)
-                    .hint_text(if pt { "Nome" } else { "Name" })
-                    .desired_width(100.0),
-            );
-            for (val, lbl) in [("music", "🎵"), ("video", "🎬")] {
-                let sel = app.profile_draft.media_type == val;
-                let fill = if sel { theme::accent() } else { theme::bg_card() };
-                if ui.add(egui::Button::new(lbl).fill(fill)).clicked() {
-                    app.profile_draft.media_type = val.to_string();
-                }
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut app.profile_draft.format)
-                    .hint_text("mp4")
-                    .desired_width(56.0),
-            );
-            ui.add(
-                egui::TextEdit::singleline(&mut app.profile_draft.quality)
-                    .hint_text("best")
-                    .desired_width(64.0),
-            );
-            if ui.add(theme::accent_button("＋")).clicked()
-                && !app.profile_draft.name.trim().is_empty()
-            {
-                app.config.profiles.push(app.profile_draft.clone());
-                app.profile_draft.name.clear();
-                *changed = true;
-            }
-        });
-    });
-}
-
 fn card_organize(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
     let s = crate::ui::i18n::s(app.config.lang);
     theme::card_frame().show(ui, |ui| {
@@ -576,7 +489,11 @@ fn card_maintenance(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
     let mut do_orphans = false;
 
     theme::card_frame().show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
+        // Trava a largura na coluna: `set_min_width` sozinho é só um piso, e o
+        // texto ao lado do botão de atualizar esticava o cartão para fora dela.
+        let w = ui.available_width();
+        ui.set_min_width(w);
+        ui.set_max_width(w);
         ui.label(
             egui::RichText::new(s.settings_maintenance)
                 .color(theme::text_muted())
@@ -594,11 +511,18 @@ fn card_maintenance(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
                 start_update(app);
             }
             ui.add_space(10.0);
+            // Os textos abaixo quebram linha: dentro de `horizontal` o padrão é
+            // não quebrar, e aí eles empurrariam a largura do cartão de novo.
             match status {
                 UpdateStatus::Idle => {
-                    ui.label(
-                        egui::RichText::new("Mantém o download funcionando quando o YouTube muda.")
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(
+                                "Mantém o download funcionando quando o YouTube muda.",
+                            )
                             .color(theme::text_faint()),
+                        )
+                        .wrap(true),
                     );
                 }
                 UpdateStatus::Running => {
@@ -609,7 +533,12 @@ fn card_maintenance(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
                     ui.label(egui::RichText::new("✔ yt-dlp atualizado!").color(theme::accent()));
                 }
                 UpdateStatus::Error(e) => {
-                    ui.label(egui::RichText::new(format!("Falha: {}", e)).color(theme::danger()));
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("Falha: {}", e)).color(theme::danger()),
+                        )
+                        .wrap(true),
+                    );
                 }
             }
         });

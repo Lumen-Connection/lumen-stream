@@ -91,7 +91,6 @@ pub fn render_images(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
                             let thumb_h = (cw * 9.0 / 16.0).min(150.0);
                             ui.set_height(thumb_h + 82.0);
                             ui.vertical(|ui| {
-                                // Miniatura (clique abre a imagem).
                                 let (rect, resp) = ui.allocate_exact_size(
                                     egui::vec2(cw, thumb_h),
                                     egui::Sense::click(),
@@ -126,7 +125,6 @@ pub fn render_images(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
                                 }
                                 ui.add_space(4.0);
 
-                                // Nome do arquivo (título).
                                 let name = path
                                     .file_name()
                                     .map(|n| n.to_string_lossy().to_string())
@@ -141,7 +139,6 @@ pub fn render_images(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
                                 )
                                 .on_hover_text(&name);
 
-                                // Extensão, ocupando o lugar do "formato".
                                 let ext = path
                                     .extension()
                                     .and_then(|e| e.to_str())
@@ -154,7 +151,6 @@ pub fn render_images(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
                                 );
                                 ui.add_space(2.0);
 
-                                // Ações no mesmo estilo compacto do histórico.
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
                                     ui.spacing_mut().button_padding = egui::vec2(2.0, 4.0);

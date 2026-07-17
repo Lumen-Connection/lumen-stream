@@ -206,3 +206,123 @@ pub(super) fn find_named(dir: &Path, target: &str, depth: u32) -> Option<PathBuf
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let d = std::env::temp_dir().join(format!("lumen_fs_test_{tag}_{nanos}"));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn binary_path_matches_platform() {
+        let dir = PathBuf::from("libs");
+        let p = binary_path(&dir, "yt-dlp");
+        if cfg!(windows) {
+            assert_eq!(p, dir.join("yt-dlp.exe"));
+        } else {
+            assert_eq!(p, dir.join("yt-dlp"));
+        }
+    }
+
+    #[test]
+    fn cleanup_partials_removes_only_temp_of_stem() {
+        let d = temp_dir("partials");
+        let keep_final = write(&d, "video.mp4", b"x");
+        let keep_other = write(&d, "outro.part", b"x");
+        let rm_part = write(&d, "video.part", b"x");
+        let rm_ytdl = write(&d, "video.ytdl", b"x");
+        let rm_frag = write(&d, "video.mp4.part-Frag001", b"x");
+        cleanup_partials(&d, "video");
+        assert!(keep_final.exists(), "arquivo final deve ficar");
+        assert!(keep_other.exists(), "temp de outro stem deve ficar");
+        assert!(!rm_part.exists() && !rm_ytdl.exists() && !rm_frag.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cleanup_temp_dir_removes_known_temps() {
+        let d = temp_dir("tempdir");
+        let keep = write(&d, "song.mp3", b"x");
+        let rm1 = write(&d, "a.part", b"x");
+        let rm2 = write(&d, "temp_audio_123.m4a", b"x");
+        let rm3 = write(&d, "temp_video_9.mp4", b"x");
+        cleanup_temp_dir(&d);
+        assert!(keep.exists());
+        assert!(!rm1.exists() && !rm2.exists() && !rm3.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn frag_bytes_sums_closed_fragments_only() {
+        let d = temp_dir("frag");
+        write(&d, "rec.ts.part-Frag0", &[0u8; 10]);
+        write(&d, "rec.ts.part-Frag1", &[0u8; 5]);
+        write(&d, "rec.ts.part", &[0u8; 100]); // em trânsito: fora da soma
+        write(&d, "outra.ts.part-Frag0", &[0u8; 7]); // outro stem: fora
+        assert_eq!(frag_bytes(&d, "rec.ts"), 15);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn part_bytes_sums_main_part_and_fragments() {
+        let d = temp_dir("part");
+        write(&d, "rec.ts.part", &[0u8; 7]);
+        write(&d, "rec.ts.part-Frag0", &[0u8; 10]);
+        write(&d, "rec.ts.mp4", &[0u8; 99]); // final: fora da soma
+        assert_eq!(part_bytes(&d, "rec.ts"), 17);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn find_output_skips_subtitles_and_temps() {
+        let d = temp_dir("findout");
+        write(&d, "song.srt", b"x");
+        write(&d, "song.part", b"x");
+        let expected = write(&d, "song.mp3", b"x");
+        assert_eq!(find_output(&d, "song"), Some(expected));
+        assert_eq!(find_output(&d, "inexistente"), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn find_named_respects_depth() {
+        let d = temp_dir("findnamed");
+        let sub = d.join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        let target = write(&sub, "alvo.txt", b"x");
+        assert_eq!(find_named(&d, "ALVO.TXT", 2), Some(target));
+        assert_eq!(find_named(&d, "alvo.txt", 0), None, "depth 0 não desce");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn concat_frag_groups_joins_in_order_largest_first() {
+        let d = temp_dir("concat");
+        // Grupo "vídeo" (maior): 2 fragmentos em ordem embaralhada no disco.
+        write(&d, "rec.f136.mp4.part-Frag1", b"CD");
+        write(&d, "rec.f136.mp4.part-Frag0", b"AB");
+        write(&d, "rec.f140.m4a.part-Frag0", b"X");
+        // Frag em trânsito (termina em .part) deve ser ignorado.
+        write(&d, "rec.f136.mp4.part-Frag2.part", b"ZZ");
+
+        let outs = concat_frag_groups(&d, "rec").await;
+        assert_eq!(outs.len(), 2);
+        assert_eq!(std::fs::read(&outs[0]).unwrap(), b"ABCD", "maior primeiro, em ordem");
+        assert_eq!(std::fs::read(&outs[1]).unwrap(), b"X");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

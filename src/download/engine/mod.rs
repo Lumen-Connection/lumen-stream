@@ -148,6 +148,14 @@ fn kill_tree(pid: u32) {
     }
     #[cfg(not(windows))]
     {
+        // O yt-dlp é criado como líder do próprio process group (process_group(0)
+        // no spawn), então o pgid == pid: matar "-pid" derruba o grupo inteiro,
+        // incluindo o ffmpeg filho — que um kill só no pid deixaria órfão.
+        let _ = std::process::Command::new("kill")
+            .args(["-9", "--", &format!("-{}", pid)])
+            .output();
+        // Fallback: se o processo não era líder de grupo (não veio do spawn do
+        // download), mata ao menos o pid direto.
         let _ = std::process::Command::new("kill")
             .args(["-9", &pid.to_string()])
             .output();

@@ -142,20 +142,14 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let cc = app.history_count("convert");
     let total = mc + vc + cc;
 
-    ui.label(
-        egui::RichText::new(s.nav_achievements)
-            .color(theme::text())
-            .size(30.0)
-            .strong(),
-    );
-    ui.label(
-        egui::RichText::new(if pt {
+    theme::page_header(
+        ui,
+        s.nav_achievements,
+        if pt {
             "Desbloqueie conquistas usando o Lumen."
         } else {
             "Unlock achievements as you use Lumen."
-        })
-        .color(theme::text_muted())
-        .size(14.0),
+        },
     );
     ui.add_space(20.0);
 
@@ -175,14 +169,34 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     ui.add_space(12.0);
 
     let avail = ui.available_width();
-    let col_w = 150.0 + 28.0 + 12.0;
+    let col_w = CARD_W + 28.0 + 12.0;
     let cols = ((avail / col_w).floor() as usize).max(1);
+
+    // Todos os cards reservam a altura da descrição mais longa (a "Trifeta"
+    // quebra em duas linhas; as demais, em uma). Sem a reserva, só ela fica mais
+    // alta e destoa da grade. Medido a cada frame porque depende do idioma, da
+    // escala da interface e da fonte — um número fixo voltaria a estourar.
+    let desc_h = badges
+        .iter()
+        .map(|b| {
+            ui.fonts(|f| {
+                f.layout(
+                    b.desc.clone(),
+                    egui::FontId::proportional(11.0),
+                    theme::text_faint(),
+                    CARD_W,
+                )
+                .rect
+                .height()
+            })
+        })
+        .fold(0.0_f32, f32::max);
 
     egui::Grid::new("badges_grid")
         .spacing(egui::vec2(12.0, 12.0))
         .show(ui, |ui| {
             for (i, b) in badges.iter().enumerate() {
-                badge_card(ui, b, pt);
+                badge_card(ui, b, pt, desc_h);
                 if (i + 1) % cols == 0 {
                     ui.end_row();
                 }
@@ -190,7 +204,11 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         });
 }
 
-fn badge_card(ui: &mut egui::Ui, b: &Badge, pt: bool) {
+/// Largura do conteúdo do card — também é a largura em que a descrição quebra.
+const CARD_W: f32 = 150.0;
+
+/// `desc_h`: altura reservada para a descrição, igual em todos os cards.
+fn badge_card(ui: &mut egui::Ui, b: &Badge, pt: bool, desc_h: f32) {
     let (fill, brd, icon_col, name_col) = if b.unlocked {
         (theme::accent_soft(), theme::accent(), theme::accent(), theme::text())
     } else {
@@ -203,8 +221,8 @@ fn badge_card(ui: &mut egui::Ui, b: &Badge, pt: bool) {
         .stroke(Stroke::new(1.0, brd))
         .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
-            ui.set_width(150.0);
-            ui.set_height(120.0);
+            ui.set_width(CARD_W);
+            ui.set_min_height(120.0);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new(b.icon).size(34.0).color(icon_col));
                 ui.add_space(2.0);
@@ -214,14 +232,26 @@ fn badge_card(ui: &mut egui::Ui, b: &Badge, pt: bool) {
                         .strong()
                         .color(name_col),
                 );
-                ui.label(
-                    egui::RichText::new(b.desc.as_str())
-                        .size(11.0)
-                        .color(if b.unlocked {
-                            theme::text_muted()
-                        } else {
-                            theme::text_faint()
-                        }),
+                // Bloco de altura fixa: a descrição curta sobra espaço em vez de
+                // encolher o card, e a longa cabe sem esticá-lo.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(CARD_W, desc_h),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_height(desc_h);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(b.desc.as_str()).size(11.0).color(
+                                    if b.unlocked {
+                                        theme::text_muted()
+                                    } else {
+                                        theme::text_faint()
+                                    },
+                                ),
+                            )
+                            .wrap(true),
+                        );
+                    },
                 );
                 ui.add_space(4.0);
                 let (status, col) = if b.unlocked {

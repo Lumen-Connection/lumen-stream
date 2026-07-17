@@ -1,7 +1,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use egui::{Color32, FontId, Rounding, Stroke};
+use egui::{Color32, FontId, RichText, Rounding, Stroke};
 
 static LIGHT: AtomicBool = AtomicBool::new(false);
 static HIGH_CONTRAST: AtomicBool = AtomicBool::new(false);
@@ -166,12 +166,42 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
+/// Margem interna do `card_frame`. Exposta para quem precisa converter entre a
+/// altura externa de um cartão e a altura do conteúdo dentro dele.
+pub const CARD_MARGIN: f32 = 18.0;
+
+/// Largura de conteúdo abaixo da qual a página entra em modo estreito. É o que
+/// sobra com a janela no tamanho mínimo (700px), descontando a barra lateral e
+/// as margens do painel central.
+pub const NARROW_W: f32 = 470.0;
+
+pub fn is_narrow(ui: &egui::Ui) -> bool {
+    ui.available_width() < NARROW_W
+}
+
+/// Cabeçalho padrão de aba: título + subtítulo.
+///
+/// Os dois quebram linha e o título encolhe em janela estreita. Um `ui.label`
+/// solto dentro de `horizontal` não quebra, e no tamanho mínimo de janela o
+/// título simplesmente saía pela borda direita e era cortado.
+pub fn page_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
+    let size = if is_narrow(ui) { 21.0 } else { 30.0 };
+    ui.add(
+        egui::Label::new(RichText::new(title).color(text()).size(size).strong()).wrap(true),
+    );
+    if !subtitle.is_empty() {
+        ui.add(
+            egui::Label::new(RichText::new(subtitle).color(text_muted()).size(14.0)).wrap(true),
+        );
+    }
+}
+
 pub fn card_frame() -> egui::Frame {
     egui::Frame::none()
         .fill(bg_card())
         .rounding(Rounding::same(CARD_ROUNDING))
         .stroke(Stroke::new(1.0, border()))
-        .inner_margin(egui::Margin::same(18.0))
+        .inner_margin(egui::Margin::same(CARD_MARGIN))
 }
 
 pub fn accent_button(label: &str) -> egui::Button<'static> {
@@ -242,4 +272,46 @@ pub fn nav_item(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> b
         return true;
     }
     resp.clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Teste único: os modos são estado global (atomics) e testes rodam em
+    // paralelo — um só teste evita corrida entre set/get de temas diferentes.
+    #[test]
+    fn theme_modes_swap_palettes_and_keep_accent() {
+        let (l0, h0, c0) = (is_light(), is_hc(), is_compact());
+
+        set_light(false);
+        set_high_contrast(false);
+        let dark_bg = bg_app();
+        let dark_text = text();
+
+        set_light(true);
+        assert!(is_light());
+        assert_ne!(bg_app(), dark_bg, "claro e escuro devem ter fundos distintos");
+        assert_ne!(text(), dark_text, "texto acompanha o tema");
+
+        // O laranja da marca é fixo, independente do tema.
+        set_light(false);
+        let a = accent();
+        set_light(true);
+        assert_eq!(accent(), a);
+        assert_eq!(a, Color32::from_rgb(0xff, 0x57, 0x22));
+
+        let normal_border = border();
+        set_high_contrast(true);
+        assert!(is_hc());
+        assert_ne!(border(), normal_border);
+
+        set_compact(true);
+        assert!(is_compact());
+
+        // Restaura o estado global para não vazar para outros testes.
+        set_light(l0);
+        set_high_contrast(h0);
+        set_compact(c0);
+    }
 }

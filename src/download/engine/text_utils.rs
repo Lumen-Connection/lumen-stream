@@ -61,3 +61,70 @@ pub fn apply_template(template: &str, title: &str, channel: &str) -> String {
     }
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_removes_invalid_chars() {
+        assert_eq!(sanitize_filename("a<b>c:d\"e/f\\g|h?i*j"), "abcdefghij");
+        assert_eq!(sanitize_filename("com\tcontrole\n"), "comcontrole");
+    }
+
+    #[test]
+    fn sanitize_truncates_to_200() {
+        let long = "x".repeat(250);
+        assert_eq!(sanitize_filename(&long).len(), 200);
+    }
+
+    #[test]
+    fn sanitize_empty_falls_back_to_download() {
+        assert_eq!(sanitize_filename(""), "download");
+        assert_eq!(sanitize_filename("???"), "download");
+        assert_eq!(sanitize_filename("   "), "download");
+    }
+
+    #[test]
+    fn smart_clean_removes_junk_brackets() {
+        assert_eq!(
+            smart_clean_name("Artist - Song (Official Video) [HD]"),
+            "Artist - Song"
+        );
+        assert_eq!(smart_clean_name("Song [4K Remaster]"), "Song");
+    }
+
+    #[test]
+    fn smart_clean_keeps_meaningful_brackets() {
+        assert_eq!(
+            smart_clean_name("Song (feat. Someone)"),
+            "Song (feat. Someone)"
+        );
+    }
+
+    #[test]
+    fn smart_clean_removes_topic_suffix_and_collapses_spaces() {
+        assert_eq!(smart_clean_name("Artist - Topic"), "Artist");
+        assert_eq!(smart_clean_name("A   B    C"), "A B C");
+    }
+
+    #[test]
+    fn smart_clean_falls_back_when_everything_is_junk() {
+        // Se a limpeza esvazia o título, devolve o original (aparado).
+        assert_eq!(smart_clean_name("(Official Video)"), "(Official Video)");
+    }
+
+    #[test]
+    fn template_replaces_placeholders() {
+        assert_eq!(
+            apply_template("%(title)s - %(uploader)s", "T", "C"),
+            "T - C"
+        );
+        assert_eq!(apply_template("%(channel)s", "T", "C"), "C");
+    }
+
+    #[test]
+    fn empty_template_falls_back_to_title() {
+        assert_eq!(apply_template("   ", "T", "C"), "T");
+    }
+}

@@ -41,3 +41,32 @@ pub fn is_gtav_supported(path: &std::path::Path) -> bool {
         .map(|e| GTAV_SUPPORTED.contains(&e.as_str()))
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn supported_formats_match_gtav_user_music() {
+        for f in ["song.mp3", "song.m4a", "song.aac", "song.wma", "SONG.MP3"] {
+            assert!(is_gtav_supported(Path::new(f)), "{f} deveria ser suportado");
+        }
+        for f in ["song.wav", "song.flac", "song.opus", "video.mp4", "sem_extensao"] {
+            assert!(!is_gtav_supported(Path::new(f)), "{f} não é suportado pelo GTA V");
+        }
+    }
+
+    #[test]
+    fn user_music_dirs_end_in_user_music() {
+        // O conjunto de pastas depende da máquina; o invariante é que toda
+        // entrada aponte para uma "User Music" dentro de Rockstar Games.
+        for d in gtav_user_music_dirs() {
+            assert_eq!(
+                d.file_name().and_then(|n| n.to_str()),
+                Some("User Music"),
+                "{d:?} deveria terminar em User Music"
+            );
+        }
+    }
+}

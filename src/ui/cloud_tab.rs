@@ -6,20 +6,14 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let s = crate::ui::i18n::s(app.config.lang);
     let pt = app.config.lang == Lang::Pt;
 
-    ui.label(
-        egui::RichText::new(s.nav_cloud)
-            .color(theme::text())
-            .size(30.0)
-            .strong(),
-    );
-    ui.label(
-        egui::RichText::new(if pt {
+    theme::page_header(
+        ui,
+        s.nav_cloud,
+        if pt {
             "Cópia automática dos downloads para uma pasta sincronizada (Drive, OneDrive, Dropbox…)."
         } else {
             "Automatically copy downloads to a synced folder (Drive, OneDrive, Dropbox…)."
-        })
-        .color(theme::text_muted())
-        .size(14.0),
+        },
     );
     ui.add_space(20.0);
 
@@ -56,7 +50,8 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut path)
-                        .desired_width(ui.available_width() - 130.0)
+                        // Reserva o botão "Escolher" antes de dimensionar o campo.
+                        .desired_width((ui.available_width() - 130.0).max(80.0))
                         .hint_text(if pt {
                             "Ex.: G:\\Meu Drive\\Lumen"
                         } else {

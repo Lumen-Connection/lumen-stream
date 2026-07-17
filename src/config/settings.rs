@@ -4,14 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::ui::i18n::Lang;
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct DownloadProfile {
-    pub name: String,
-    pub media_type: String,
-    pub format: String,
-    pub quality: String,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Theme {
     Dark,
@@ -95,8 +87,6 @@ pub struct Config {
     pub confirm_delete: bool,
     #[serde(default)]
     pub onboarded: bool,
-    #[serde(default)]
-    pub profiles: Vec<DownloadProfile>,
     #[serde(default = "default_true")]
     pub auto_retry: bool,
     #[serde(default = "default_img_format")]
@@ -203,7 +193,6 @@ impl Default for Config {
             last_tab: String::new(),
             confirm_delete: false,
             onboarded: false,
-            profiles: Vec::new(),
             auto_retry: true,
             image_format: default_img_format(),
             image_max_width: 0,
@@ -248,5 +237,74 @@ impl Config {
 
     pub fn db_path(&self) -> PathBuf {
         Self::data_dir().join("lumen.db")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_sane() {
+        let c = Config::default();
+        assert_eq!(c.music_format, "mp3");
+        assert_eq!(c.video_format, "mp4");
+        assert_eq!(c.quality, "best");
+        assert_eq!(c.max_history, 50);
+        assert_eq!(c.sub_langs, "pt,en");
+        assert_eq!(c.concurrent_fragments, 4);
+        assert_eq!(c.organize_by, "none");
+        assert_eq!(c.filename_template, "%(title)s");
+        assert_eq!(c.image_format, "jpg");
+        assert_eq!(c.image_quality, 85);
+        assert_eq!(c.watermark_pos, "br");
+        assert_eq!(c.watermark_scale, 100);
+        assert_eq!(c.ui_scale, 1.0);
+        assert_eq!((c.win_w, c.win_h), (960.0, 640.0));
+        assert!(c.notify_on_complete && c.smart_rename && c.auto_retry);
+        assert!(!c.subtitles && !c.high_contrast && !c.onboarded);
+        assert!(c.theme == Theme::Dark);
+        assert_eq!(c.convert_engine, ConvertEngine::Auto);
+        assert_eq!(c.home_cards, vec!["music", "video", "transcribe", "converter"]);
+        assert_eq!(
+            c.default_download_dir.file_name().and_then(|n| n.to_str()),
+            Some("LumenStream")
+        );
+    }
+
+    // Config antiga no disco (sem os campos novos) deve carregar com os
+    // defaults preenchidos — é o contrato dos #[serde(default)].
+    #[test]
+    fn old_config_json_gains_defaults_for_new_fields() {
+        let minimal = r#"{
+            "default_download_dir": "C:/dl",
+            "music_format": "opus",
+            "video_format": "mkv",
+            "quality": "1080",
+            "max_history": 10
+        }"#;
+        let c: Config = serde_json::from_str(minimal).expect("json mínimo deve carregar");
+        assert_eq!(c.music_format, "opus");
+        assert_eq!(c.max_history, 10);
+        assert_eq!(c.sub_langs, "pt,en");
+        assert_eq!(c.concurrent_fragments, 4);
+        assert!(c.notify_on_complete && c.auto_retry);
+        assert_eq!(c.watermark_opacity, 0.8);
+        assert!(c.theme == Theme::Dark);
+    }
+
+    #[test]
+    fn serde_roundtrip_preserves_fields() {
+        let mut c = Config::default();
+        c.music_format = "flac".into();
+        c.theme = Theme::Light;
+        c.convert_engine = ConvertEngine::LibreOffice;
+        c.home_pinned = vec!["music".into()];
+        let json = serde_json::to_string(&c).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.music_format, "flac");
+        assert!(back.theme == Theme::Light);
+        assert_eq!(back.convert_engine, ConvertEngine::LibreOffice);
+        assert_eq!(back.home_pinned, vec!["music"]);
     }
 }

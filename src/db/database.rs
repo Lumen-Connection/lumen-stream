@@ -460,4 +460,112 @@ mod tests {
         );
         let _ = std::fs::remove_file(&path);
     }
+
+    fn seeded_db(tag: &str) -> (PathBuf, Database, i64) {
+        let path = temp_db_path(tag);
+        let db = Database::open(&path);
+        db.add_history("http://u/1", "Item", "music", "mp3", "best", "C:/x", "C:/x/i.mp3", None);
+        let id = db.all_active_history()[0].id;
+        (path, db, id)
+    }
+
+    #[test]
+    fn favorite_toggles_on_and_off() {
+        let (path, db, id) = seeded_db("fav");
+        db.toggle_favorite(id);
+        assert!(db.all_active_history()[0].favorite);
+        db.toggle_favorite(id);
+        assert!(!db.all_active_history()[0].favorite);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tags_are_saved_per_item() {
+        let (path, db, id) = seeded_db("tags");
+        db.set_tags(id, "rock, anos 80");
+        assert_eq!(db.all_active_history()[0].tags, "rock, anos 80");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn restore_brings_item_back_from_trash() {
+        let (path, db, id) = seeded_db("restore");
+        db.delete_history(id);
+        assert!(db.all_active_history().is_empty());
+        db.restore_history(id);
+        assert!(db.all_active_history().iter().any(|h| h.id == id));
+        assert!(db.get_deleted_history("music", 10).is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn empty_trash_deletes_permanently() {
+        let (path, db, id) = seeded_db("trash");
+        db.delete_history(id);
+        db.empty_trash("music");
+        assert!(db.get_deleted_history("music", 10).is_empty());
+        db.restore_history(id); // não há mais o que restaurar
+        assert!(db.all_active_history().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn url_exists_only_for_active_entries() {
+        let (path, db, id) = seeded_db("urlexists");
+        assert!(db.url_exists("http://u/1"));
+        assert!(!db.url_exists("http://outro"));
+        assert!(!db.url_exists(""), "url vazia nunca conta como duplicada");
+        db.delete_history(id);
+        assert!(!db.url_exists("http://u/1"), "item na lixeira não bloqueia novo download");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clear_history_moves_only_that_media_type() {
+        let path = temp_db_path("clear");
+        let db = Database::open(&path);
+        db.add_history("u1", "M", "music", "mp3", "best", "C:/x", "C:/x/m.mp3", None);
+        db.add_history("u2", "V", "video", "mp4", "best", "C:/x", "C:/x/v.mp4", None);
+        db.clear_history("music");
+        let rest = db.all_active_history();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].media_type, "video");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn update_and_rewrite_paths() {
+        let (path, db, id) = seeded_db("paths");
+        db.update_file_path(id, "D:/novo/i.mp3");
+        assert_eq!(db.all_active_history()[0].file_path, "D:/novo/i.mp3");
+        db.rewrite_path_prefix("D:/novo", "D:/LumenStream");
+        let h = &db.all_active_history()[0];
+        assert_eq!(h.file_path, "D:/LumenStream/i.mp3");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn folders_rename_and_dedupe() {
+        let path = temp_db_path("foldops");
+        let db = Database::open(&path);
+        db.add_folder("Docs", "C:/Docs");
+        db.add_folder("Duplicada", "C:/Docs"); // caminho é UNIQUE: ignorada
+        assert_eq!(db.get_folders().len(), 1);
+        let id = db.get_folders()[0].id;
+        db.rename_folder(id, "Documentos");
+        assert_eq!(db.get_folders()[0].name, "Documentos");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_roundtrip_and_overwrite() {
+        let path = temp_db_path("settings");
+        let db = Database::open(&path);
+        assert_eq!(db.get_setting("chave"), None);
+        db.set_setting("chave", "v1");
+        assert_eq!(db.get_setting("chave"), Some("v1".to_string()));
+        db.set_setting("chave", "v2");
+        assert_eq!(db.get_setting("chave"), Some("v2".to_string()));
+        let _ = std::fs::remove_file(&path);
+    }
 }

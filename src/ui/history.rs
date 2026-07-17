@@ -14,13 +14,27 @@ pub fn render(
     let s = crate::ui::i18n::s(app.config.lang);
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
 
-    ui.horizontal(|ui| {
+    // Em janela estreita os botões de ação descem para uma linha própria, em vez
+    // de ficarem alinhados à direita do título e saírem pela borda.
+    let narrow = theme::is_narrow(ui);
+    if narrow {
         ui.label(
             egui::RichText::new(title)
                 .color(theme::text())
                 .size(18.0)
                 .strong(),
         );
+        ui.add_space(4.0);
+    }
+    ui.horizontal_wrapped(|ui| {
+        if !narrow {
+            ui.label(
+                egui::RichText::new(title)
+                    .color(theme::text())
+                    .size(18.0)
+                    .strong(),
+            );
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if !history.is_empty() && ui.add(theme::ghost_button(s.hist_clear)).clicked() {
                 if app.config.confirm_delete {
@@ -110,12 +124,16 @@ pub fn render(
     formats.sort();
     formats.dedup();
 
-    ui.horizontal(|ui| {
+    // `horizontal_wrapped` + busca elástica: o campo tinha 380px fixos, que
+    // somados ao filtro, ao ⭐ e ao modo de exibição saíam pela borda com a
+    // janela no tamanho mínimo.
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().interact_size.y = 34.0;
+        let search_w = (ui.available_width() - 250.0).clamp(130.0, 380.0);
         ui.add(
             egui::TextEdit::singleline(&mut app.history_search)
                 .hint_text(s.hist_search)
-                .desired_width(380.0)
+                .desired_width(search_w)
                 .margin(egui::vec2(10.0, 7.0))
                 .text_color(theme::text()),
         );
@@ -259,7 +277,6 @@ pub fn render(
                                                     .color(theme::text_muted())
                                                     .size(11.0),
                                             );
-                                            // Data + seleção (ações em massa).
                                             ui.horizontal(|ui| {
                                                 ui.label(
                                                     egui::RichText::new(&entry.created_at)
@@ -411,7 +428,6 @@ pub fn render(
                             .show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
-                                    // Coluna: título (seleção + favorito + selo + thumb + título).
                                     ui.allocate_ui_with_layout(
                                         egui::vec2(title_w, ROW_H),
                                         egui::Layout::left_to_right(egui::Align::Center),
@@ -491,7 +507,6 @@ pub fn render(
                                             .on_hover_text(&entry.title);
                                         },
                                     );
-                                    // Coluna: formato.
                                     ui.allocate_ui_with_layout(
                                         egui::vec2(fmt_w, ROW_H),
                                         egui::Layout::left_to_right(egui::Align::Center),
@@ -500,7 +515,6 @@ pub fn render(
                                             ui.label(egui::RichText::new(&entry.format).color(theme::text_muted()));
                                         },
                                     );
-                                    // Coluna: data.
                                     ui.allocate_ui_with_layout(
                                         egui::vec2(date_w, ROW_H),
                                         egui::Layout::left_to_right(egui::Align::Center),

@@ -860,8 +860,16 @@ fn render_toasts(app: &mut App, ctx: &egui::Context) {
     }
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
     let mut undo_id: Option<i64> = None;
+
+    // Um aviso não pode roubar o clique de quem está usando o app: por padrão
+    // toda `Area` captura o ponteiro na sua região, e aí o usuário teria que
+    // esperar o toast sumir para clicar. Só quando há "Desfazer" existe algo
+    // para clicar dentro dele — fora isso, o clique atravessa.
+    let has_undo = app.toasts.iter().any(|t| t.undo.is_some());
+
     egui::Area::new("toasts".into())
         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
+        .interactable(has_undo)
         .show(ctx, |ui| {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
                 for t in app.toasts.iter().rev() {
@@ -972,31 +980,39 @@ fn render_sidebar(app: &mut App, ctx: &egui::Context) {
                 ("⚙", s.nav_settings, Tab::Settings),
                 ("❓", s.nav_help, Tab::Help),
             ];
-            let footer_h = 150.0;
-            let nav_h = (ui.available_height() - footer_h).max(120.0);
+            // O rodapé é reservado antes da navegação: assim ele sempre cabe e a
+            // lista rola dentro do que sobrar. Reservar uma altura fixa para a
+            // navegação fazia o contrário — numa janela baixa ela pedia mais do
+            // que havia e o cartão de armazenamento cobria os últimos itens.
+            egui::TopBottomPanel::bottom("sidebar_footer")
+                .frame(egui::Frame::none())
+                .show_inside(ui, |ui| {
+                    ui.add_space(6.0);
+                    storage_footer(ui, app);
+                    ui.add_space(6.0);
+                    if app.connection_texture.is_none() {
+                        app.connection_texture = crate::app::load_connection_texture(ui.ctx());
+                    }
+                    credit_footer(
+                        ui,
+                        app.connection_texture.as_ref(),
+                        app.config.lang == crate::ui::i18n::Lang::Pt,
+                    );
+                });
+
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .max_height(nav_h)
                 .show(ui, |ui| {
                     for (icon, label, tab) in nav {
+                        if !tab.visible() {
+                            continue;
+                        }
                         if theme::nav_item(ui, icon, label, app.active_tab == tab) {
                             app.active_tab = tab;
                         }
                         ui.add_space(3.0);
                     }
                 });
-
-            ui.add_space(6.0);
-            storage_footer(ui, app);
-            ui.add_space(6.0);
-            if app.connection_texture.is_none() {
-                app.connection_texture = crate::app::load_connection_texture(ui.ctx());
-            }
-            credit_footer(
-                ui,
-                app.connection_texture.as_ref(),
-                app.config.lang == crate::ui::i18n::Lang::Pt,
-            );
         });
 }
 
@@ -1518,33 +1534,6 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                         });
                     }
                     ui.add_space(6.0);
-
-                    if !is_convert {
-                        let mt_id = if media_type == MediaType::Music { "music" } else { "video" };
-                        let profiles: Vec<(String, String, String)> = app
-                            .config
-                            .profiles
-                            .iter()
-                            .filter(|p| p.media_type == mt_id)
-                            .map(|p| (p.name.clone(), p.format.clone(), p.quality.clone()))
-                            .collect();
-                        if !profiles.is_empty() {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    egui::RichText::new(if pt { "Perfil:" } else { "Profile:" })
-                                        .color(theme::text_muted())
-                                        .size(12.0),
-                                );
-                                for (name, pf, pq) in &profiles {
-                                    if ui.add(theme::ghost_button(name)).clicked() {
-                                        new_format = pf.clone();
-                                        new_quality = pq.clone();
-                                    }
-                                }
-                            });
-                            ui.add_space(6.0);
-                        }
-                    }
 
                     ui.label(if is_convert { s.f_format_to } else { s.f_format });
                     ui.horizontal_wrapped(|ui| {

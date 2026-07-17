@@ -3,34 +3,49 @@ use crate::ui::theme;
 
 pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let s = crate::ui::i18n::s(app.config.lang);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(s.folders_title)
-                .color(theme::text())
-                .size(30.0)
-                .strong(),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add(theme::accent_button(s.folders_new).min_size(egui::vec2(140.0, 40.0)))
-                .clicked()
-            {
-                if let Some(picked) = rfd::FileDialog::new().pick_folder() {
-                    let name = picked
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "Pasta".to_string());
-                    std::fs::create_dir_all(&picked).ok();
-                    app.db.add_folder(&name, &picked.to_string_lossy());
-                }
-            }
+    // Em janela estreita o botão desce para uma linha própria: alinhado à
+    // direita do título, ele saía pela borda.
+    let narrow = theme::is_narrow(ui);
+    let mut new_folder = false;
+    if narrow {
+        theme::page_header(ui, s.folders_title, s.folders_subtitle);
+        ui.add_space(8.0);
+        new_folder = ui
+            .add(theme::accent_button(s.folders_new).min_size(egui::vec2(140.0, 40.0)))
+            .clicked();
+    } else {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(s.folders_title)
+                    .color(theme::text())
+                    .size(30.0)
+                    .strong(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                new_folder = ui
+                    .add(theme::accent_button(s.folders_new).min_size(egui::vec2(140.0, 40.0)))
+                    .clicked();
+            });
         });
-    });
-    ui.label(
-        egui::RichText::new(s.folders_subtitle)
-            .color(theme::text_muted())
-            .size(14.0),
-    );
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(s.folders_subtitle)
+                    .color(theme::text_muted())
+                    .size(14.0),
+            )
+            .wrap(true),
+        );
+    }
+    if new_folder {
+        if let Some(picked) = rfd::FileDialog::new().pick_folder() {
+            let name = picked
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Pasta".to_string());
+            std::fs::create_dir_all(&picked).ok();
+            app.db.add_folder(&name, &picked.to_string_lossy());
+        }
+    }
     ui.add_space(20.0);
 
     let folders = app.folders();

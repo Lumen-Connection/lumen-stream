@@ -4,17 +4,7 @@ use crate::ui::theme;
 pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     let s = crate::ui::i18n::s(app.config.lang);
 
-    ui.label(
-        egui::RichText::new(s.video_title)
-            .color(theme::text())
-            .size(30.0)
-            .strong(),
-    );
-    ui.label(
-        egui::RichText::new(s.video_subtitle)
-            .color(theme::text_muted())
-            .size(14.0),
-    );
+    theme::page_header(ui, s.video_title, s.video_subtitle);
     ui.add_space(20.0);
 
     if let Some(link) = app.clip_suggest.clone() {
@@ -50,6 +40,11 @@ pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     let mut thumbnail = false;
     let mut inspect = false;
     theme::card_frame().show(ui, |ui| {
+        // Trava no painel: sem teto, o card cresce com o conteúdo e vaza pela
+        // borda em janela estreita.
+        let cw = ui.available_width();
+        ui.set_min_width(cw);
+        ui.set_max_width(cw);
         ui.label(
             egui::RichText::new(s.video_link)
                 .color(theme::text_muted())
@@ -58,8 +53,10 @@ pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
         );
         ui.add_space(8.0);
         ui.horizontal(|ui| {
+            // Reserva "Colar" + "Download" antes de dimensionar o campo.
+            let field_w = (ui.available_width() - 185.0).max(80.0);
             let resp = ui.add_sized(
-                egui::vec2(ui.available_width() - 185.0, 40.0),
+                egui::vec2(field_w, 40.0),
                 egui::TextEdit::singleline(&mut app.video_url)
                     .hint_text("https://...")
                     .text_color(theme::text())
@@ -88,7 +85,9 @@ pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
             }
         });
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        // `horizontal_wrapped`: são até 6 botões nesta fileira — em janela
+        // estreita eles passam para a linha de baixo em vez de sair pela borda.
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .add(
                     egui::Button::new(

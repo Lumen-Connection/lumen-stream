@@ -440,3 +440,202 @@ pub fn playlist_id_from_url(url: &str) -> Option<String> {
 pub fn is_playlist(url: &str) -> bool {
     playlist_id_from_url(url).is_some()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::MediaType;
+
+    fn add(q: &Queue, url: &str) {
+        q.add(
+            url.to_string(),
+            url.to_string(),
+            MediaType::Music,
+            "mp3".to_string(),
+            "best".to_string(),
+            PathBuf::from("C:/out"),
+        );
+    }
+
+    fn ids(q: &Queue) -> Vec<u64> {
+        q.jobs.lock().unwrap().iter().map(|j| j.id).collect()
+    }
+
+    fn status_of(q: &Queue, id: u64) -> JobStatus {
+        q.jobs.lock().unwrap().iter().find(|j| j.id == id).unwrap().status.clone()
+    }
+
+    fn set(q: &Queue, id: u64, st: JobStatus) {
+        q.jobs.lock().unwrap().iter_mut().find(|j| j.id == id).unwrap().status = st;
+    }
+
+    fn temp_file(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("lumen_queue_test_{tag}_{nanos}.json"))
+    }
+
+    #[test]
+    fn add_assigns_sequential_ids_and_queued_status() {
+        let q = Queue::new();
+        add(&q, "u1");
+        add(&q, "u2");
+        assert_eq!(ids(&q), vec![1, 2]);
+        assert!(status_of(&q, 1) == JobStatus::Queued);
+        assert!(q.has_active());
+    }
+
+    #[test]
+    fn move_operations_reorder_jobs() {
+        let q = Queue::new();
+        add(&q, "a");
+        add(&q, "b");
+        add(&q, "c");
+        q.move_to_top(3);
+        assert_eq!(ids(&q), vec![3, 1, 2]);
+        q.move_down(3);
+        assert_eq!(ids(&q), vec![1, 3, 2]);
+        q.move_up(2);
+        assert_eq!(ids(&q), vec![1, 2, 3]);
+        // Extremos são no-op.
+        q.move_up(1);
+        q.move_down(3);
+        assert_eq!(ids(&q), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn pause_resume_cancel_transitions() {
+        let mut q = Queue::new();
+        add(&q, "a");
+        q.pause(1);
+        assert!(status_of(&q, 1) == JobStatus::Paused);
+        q.resume(1);
+        assert!(status_of(&q, 1) == JobStatus::Queued);
+        q.cancel(1);
+        assert!(status_of(&q, 1) == JobStatus::Cancelled);
+        // Cancelado não volta com resume nem vira pausado.
+        q.resume(1);
+        q.pause(1);
+        assert!(status_of(&q, 1) == JobStatus::Cancelled);
+        assert!(!q.has_active());
+    }
+
+    #[test]
+    fn pause_does_not_touch_completed() {
+        let mut q = Queue::new();
+        add(&q, "a");
+        set(&q, 1, JobStatus::Completed("f".into()));
+        q.pause(1);
+        assert!(matches!(status_of(&q, 1), JobStatus::Completed(_)));
+    }
+
+    #[test]
+    fn clear_finished_keeps_only_active() {
+        let mut q = Queue::new();
+        for u in ["a", "b", "c", "d"] {
+            add(&q, u);
+        }
+        set(&q, 2, JobStatus::Completed("f".into()));
+        set(&q, 3, JobStatus::Failed("e".into()));
+        set(&q, 4, JobStatus::Running);
+        q.clear_finished();
+        assert_eq!(ids(&q), vec![1, 4]);
+    }
+
+    #[test]
+    fn signature_changes_with_status() {
+        let q = Queue::new();
+        add(&q, "a");
+        let s1 = q.signature();
+        set(&q, 1, JobStatus::Running);
+        assert_ne!(q.signature(), s1, "mudança de status deve mudar a assinatura");
+    }
+
+    #[test]
+    fn save_load_roundtrip_skips_finished() {
+        let q = Queue::new();
+        for u in ["fica1", "some1", "some2", "fica2"] {
+            add(&q, u);
+        }
+        set(&q, 2, JobStatus::Completed("f".into()));
+        set(&q, 3, JobStatus::Cancelled);
+        set(&q, 4, JobStatus::Paused); // pendente: deve ser salvo
+
+        let path = temp_file("roundtrip");
+        q.save(&path);
+
+        let mut q2 = Queue::new();
+        q2.load(&path);
+        let urls: Vec<String> = q2.jobs.lock().unwrap().iter().map(|j| j.url.clone()).collect();
+        assert_eq!(urls, vec!["fica1", "fica2"]);
+        // Tudo volta como Queued, pronto para o pump.
+        assert!(q2.jobs.lock().unwrap().iter().all(|j| j.status == JobStatus::Queued));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_removes_file_when_nothing_pending() {
+        let q = Queue::new();
+        add(&q, "a");
+        set(&q, 1, JobStatus::Completed("f".into()));
+        let path = temp_file("empty");
+        std::fs::write(&path, "[]").unwrap();
+        q.save(&path);
+        assert!(!path.exists(), "fila sem pendências apaga o arquivo salvo");
+    }
+
+    #[test]
+    fn load_ignores_missing_or_corrupt_file() {
+        let mut q = Queue::new();
+        q.load(&temp_file("inexistente"));
+        assert!(ids(&q).is_empty());
+        let path = temp_file("corrupt");
+        std::fs::write(&path, "{nao é json válido").unwrap();
+        q.load(&path);
+        assert!(ids(&q).is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn progress_is_clamped() {
+        let q = Queue::new();
+        add(&q, "a");
+        set_progress(&q.jobs, 1, 1.5, 10.0, 3);
+        let jobs = q.jobs.lock().unwrap();
+        assert_eq!(jobs[0].progress, Some(1.0));
+        assert_eq!(jobs[0].speed, 10.0);
+        assert_eq!(jobs[0].eta, 3);
+    }
+
+    #[test]
+    fn network_errors_are_detected_for_auto_retry() {
+        for msg in [
+            "Connection reset by peer",
+            "request timed out",
+            "getaddrinfo failed",
+            "HTTP Error 503",
+            "unable to download video data",
+        ] {
+            assert!(is_network_error(msg), "{msg} deveria ser erro de rede");
+        }
+        assert!(!is_network_error("Video unavailable"));
+        assert!(!is_network_error("requested format is not available"));
+    }
+
+    #[test]
+    fn playlist_detection_from_url() {
+        assert_eq!(
+            playlist_id_from_url("https://youtube.com/watch?v=abc&list=PL123"),
+            Some("PL123".to_string())
+        );
+        assert_eq!(
+            playlist_id_from_url("https://youtube.com/playlist?list=PL9&index=2"),
+            Some("PL9".to_string())
+        );
+        assert_eq!(playlist_id_from_url("https://youtube.com/watch?v=abc"), None);
+        assert!(is_playlist("https://youtube.com/watch?v=a&list=x"));
+        assert!(!is_playlist("https://youtube.com/watch?v=a"));
+    }
+}

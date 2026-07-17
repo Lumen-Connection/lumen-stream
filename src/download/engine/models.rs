@@ -194,3 +194,112 @@ pub fn output_formats(category: FileCategory) -> Vec<&'static str> {
         FileCategory::Unknown => vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn duration_formats_minutes_and_hours() {
+        assert_eq!(format_duration(5), "0:05");
+        assert_eq!(format_duration(62), "1:02");
+        assert_eq!(format_duration(3600), "1:00:00");
+        assert_eq!(format_duration(3723), "1:02:03");
+    }
+
+    #[test]
+    fn duration_clamps_negative_to_zero() {
+        assert_eq!(format_duration(-10), "0:00");
+    }
+
+    #[test]
+    fn size_uses_correct_units() {
+        assert_eq!(format_size(500), "500 B");
+        assert_eq!(format_size(2048), "2 KB");
+        assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.00 GB");
+    }
+
+    #[test]
+    fn organize_by_type_maps_media() {
+        assert_eq!(organize_subfolder("type", "music", ""), Some("Música".into()));
+        assert_eq!(organize_subfolder("type", "video", ""), Some("Vídeo".into()));
+        assert_eq!(organize_subfolder("type", "convert", ""), Some("Convertidos".into()));
+        assert_eq!(organize_subfolder("type", "other", ""), Some("Outros".into()));
+    }
+
+    #[test]
+    fn organize_by_date_is_iso_day() {
+        let d = organize_subfolder("date", "music", "").unwrap();
+        assert_eq!(d.len(), 10, "esperado YYYY-MM-DD, veio {d}");
+        assert_eq!(d.as_bytes()[4], b'-');
+        assert_eq!(d.as_bytes()[7], b'-');
+    }
+
+    #[test]
+    fn organize_by_channel_sanitizes_and_skips_empty() {
+        assert_eq!(
+            organize_subfolder("channel", "music", "Canal/Legal"),
+            Some("CanalLegal".into())
+        );
+        assert_eq!(organize_subfolder("channel", "music", ""), None);
+        assert_eq!(organize_subfolder("channel", "music", "???"), None);
+    }
+
+    #[test]
+    fn organize_none_returns_none() {
+        assert_eq!(organize_subfolder("none", "music", "c"), None);
+    }
+
+    #[test]
+    fn audio_format_detection() {
+        for f in ["mp3", "m4a", "aac", "opus", "ogg", "wav", "flac"] {
+            assert!(is_audio_format(f), "{f} deveria ser áudio");
+        }
+        assert!(!is_audio_format("mp4"));
+        assert!(!is_audio_format(""));
+    }
+
+    #[test]
+    fn categorize_by_extension() {
+        let cases = [
+            ("a.mp3", FileCategory::Audio),
+            ("a.FLAC", FileCategory::Audio),
+            ("a.mp4", FileCategory::Video),
+            ("a.mkv", FileCategory::Video),
+            ("a.png", FileCategory::Image),
+            ("a.pdf", FileCategory::Document),
+            ("a.docx", FileCategory::Office),
+            ("a.xlsx", FileCategory::Office),
+            ("a.xyz", FileCategory::Unknown),
+            ("sem_extensao", FileCategory::Unknown),
+        ];
+        for (name, expected) in cases {
+            assert!(
+                categorize(&PathBuf::from(name)) == expected,
+                "categoria errada para {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn output_formats_cover_categories() {
+        assert!(output_formats(FileCategory::Audio).contains(&"mp3"));
+        assert!(output_formats(FileCategory::Video).contains(&"mp4"));
+        assert!(output_formats(FileCategory::Image).contains(&"png"));
+        assert!(output_formats(FileCategory::Office).contains(&"pdf"));
+        assert!(output_formats(FileCategory::Unknown).is_empty());
+    }
+
+    #[test]
+    fn download_options_defaults() {
+        let o = DownloadOptions::default();
+        assert!(!o.is_audio);
+        assert_eq!(o.format, "mp4");
+        assert_eq!(o.quality, "best");
+        assert_eq!(o.concurrent_fragments, 4);
+        assert!(!o.is_live);
+        assert!(o.stop.is_none());
+    }
+}

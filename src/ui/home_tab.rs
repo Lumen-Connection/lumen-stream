@@ -5,24 +5,43 @@ use crate::ui::theme;
 pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let s = crate::ui::i18n::s(app.config.lang);
 
+    // Dentro de um `horizontal` o label não quebra linha: na janela no tamanho
+    // mínimo o título saía pela borda direita e era cortado. Encolher a fonte
+    // mantém ele inteiro em vez de escondê-lo.
+    let narrow = ui.available_width() < 470.0;
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("◆").size(28.0).color(theme::accent()));
         ui.label(
-            egui::RichText::new(s.home_title)
-                .color(theme::text())
-                .size(30.0)
-                .strong(),
+            egui::RichText::new("◆")
+                .size(if narrow { 20.0 } else { 28.0 })
+                .color(theme::accent()),
+        );
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(s.home_title)
+                    .color(theme::text())
+                    .size(if narrow { 21.0 } else { 30.0 })
+                    .strong(),
+            )
+            .wrap(true),
         );
     });
-    ui.label(
-        egui::RichText::new(s.home_subtitle)
-            .color(theme::text_muted())
-            .size(14.0),
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(s.home_subtitle)
+                .color(theme::text_muted())
+                .size(14.0),
+        )
+        .wrap(true),
     );
     ui.add_space(20.0);
 
     let mut submit = false;
     theme::card_frame().show(ui, |ui| {
+        // Trava no painel: `set_min_width` é só um piso, e sem um teto o card
+        // cresce junto com o conteúdo e vaza pela borda na janela estreita.
+        let w = ui.available_width();
+        ui.set_min_width(w);
+        ui.set_max_width(w);
         ui.label(
             egui::RichText::new(s.home_quick)
                 .color(theme::text_muted())
@@ -31,8 +50,11 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         );
         ui.add_space(8.0);
         ui.horizontal(|ui| {
+            // Reserva o botão (120 + espaçamento) antes de dimensionar o campo —
+            // senão, em janela estreita, o "Download" era empurrado para fora.
+            let field_w = (ui.available_width() - 140.0).max(80.0);
             let resp = ui.add_sized(
-                egui::vec2(ui.available_width() - 140.0, 40.0),
+                egui::vec2(field_w, 40.0),
                 egui::TextEdit::singleline(&mut app.video_url)
                     .hint_text("https://...")
                     .text_color(theme::text())
@@ -57,30 +79,45 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     ui.add_space(18.0);
 
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(if pt { "Atalhos" } else { "Shortcuts" })
-                .color(theme::text_muted())
-                .size(11.0)
-                .strong(),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let lbl = if app.home_edit {
-                if pt { "✓ Concluir" } else { "✓ Done" }
-            } else {
-                if pt { "✎ Editar" } else { "✎ Edit" }
-            };
-            if ui.add(theme::ghost_button(lbl)).clicked() {
-                app.home_edit = !app.home_edit;
-                if !app.home_edit {
-                    app.config.save();
-                }
-            }
-            if ui.add(theme::ghost_button(s.btn_clear_temp)).clicked() {
-                app.clear_temp_files_toast();
-            }
+    let edit_lbl = if app.home_edit {
+        if pt { "✓ Concluir" } else { "✓ Done" }
+    } else {
+        if pt { "✎ Editar" } else { "✎ Edit" }
+    };
+    let mut toggle_edit = false;
+    let mut clear_temp = false;
+    let shortcuts_lbl = egui::RichText::new(if pt { "Atalhos" } else { "Shortcuts" })
+        .color(theme::text_muted())
+        .size(11.0)
+        .strong();
+
+    // Em janela estreita os botões descem para a linha de baixo e quebram entre
+    // si: alinhados à direita na mesma linha do rótulo, eles saíam pela borda.
+    if narrow {
+        ui.label(shortcuts_lbl);
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            toggle_edit = ui.add(theme::ghost_button(edit_lbl)).clicked();
+            clear_temp = ui.add(theme::ghost_button(s.btn_clear_temp)).clicked();
         });
-    });
+    } else {
+        ui.horizontal(|ui| {
+            ui.label(shortcuts_lbl);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                toggle_edit = ui.add(theme::ghost_button(edit_lbl)).clicked();
+                clear_temp = ui.add(theme::ghost_button(s.btn_clear_temp)).clicked();
+            });
+        });
+    }
+    if toggle_edit {
+        app.home_edit = !app.home_edit;
+        if !app.home_edit {
+            app.config.save();
+        }
+    }
+    if clear_temp {
+        app.clear_temp_files_toast();
+    }
     ui.add_space(6.0);
 
     if app.home_edit {
@@ -114,7 +151,6 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     }
 
     ui.add_space(18.0);
-    // Recomendação do recurso "Sincronizar Jogos".
     let mut go_games = false;
     theme::card_frame().show(ui, |ui| {
         ui.set_min_width(ui.available_width());

@@ -14,7 +14,7 @@ pub enum Cmd {
 
 pub fn all_commands(pt: bool) -> Vec<(String, Cmd)> {
     let go = |icon: &str, name: &str, tab: Tab| (format!("{}  {}", icon, name), Cmd::Go(tab));
-    vec![
+    let mut cmds = vec![
         go("🏠", if pt { "Início" } else { "Home" }, Tab::Home),
         go("🎵", if pt { "Baixar Música" } else { "Download Music" }, Tab::Music),
         go("🎬", if pt { "Baixar Vídeo" } else { "Download Video" }, Tab::Video),
@@ -42,7 +42,12 @@ pub fn all_commands(pt: bool) -> Vec<(String, Cmd)> {
             format!("🧹  {}", if pt { "Limpar arquivos temporários" } else { "Clear temp files" }),
             Cmd::ClearTemp,
         ),
-    ]
+    ];
+    cmds.retain(|(_, cmd)| match cmd {
+        Cmd::Go(tab) => tab.visible(),
+        _ => true,
+    });
+    cmds
 }
 
 pub fn run(app: &mut App, cmd: Cmd) {
@@ -68,5 +73,44 @@ pub fn run(app: &mut App, cmd: Cmd) {
             app.restyle = true;
         }
         Cmd::ClearTemp => app.clear_temp_files_toast(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_has_same_commands_in_both_languages() {
+        let pt = all_commands(true);
+        let en = all_commands(false);
+        assert_eq!(pt.len(), en.len());
+        assert!(!pt.is_empty());
+        assert!(
+            pt.iter().zip(&en).any(|((a, _), (b, _))| a != b),
+            "os rótulos traduzidos devem diferir entre os idiomas"
+        );
+    }
+
+    #[test]
+    fn palette_only_lists_visible_tabs_and_has_actions() {
+        let cmds = all_commands(true);
+        assert!(cmds.iter().all(|(label, _)| !label.trim().is_empty()));
+        let mut gos = 0;
+        let (mut upd, mut open, mut theme, mut temp) = (false, false, false, false);
+        for (_, cmd) in &cmds {
+            match cmd {
+                Cmd::Go(tab) => {
+                    assert!(tab.visible(), "aba invisível não pode aparecer na paleta");
+                    gos += 1;
+                }
+                Cmd::UpdateYtdlp => upd = true,
+                Cmd::OpenDownloads => open = true,
+                Cmd::ToggleTheme => theme = true,
+                Cmd::ClearTemp => temp = true,
+            }
+        }
+        assert!(gos > 0, "paleta deve navegar para abas");
+        assert!(upd && open && theme && temp, "todas as ações devem estar na paleta");
     }
 }

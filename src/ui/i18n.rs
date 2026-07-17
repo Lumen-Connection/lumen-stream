@@ -189,6 +189,42 @@ pub fn s(lang: Lang) -> &'static Strings {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_language_is_portuguese() {
+        assert!(Lang::default() == Lang::Pt);
+    }
+
+    #[test]
+    fn languages_resolve_to_distinct_tables() {
+        let pt = s(Lang::Pt);
+        let en = s(Lang::En);
+        assert_eq!(pt.nav_home, "Início");
+        assert_ne!(pt.nav_home, en.nav_home);
+        assert_ne!(pt.settings_title, en.settings_title);
+        for (tag, v) in [
+            ("pt.nav_music", pt.nav_music),
+            ("en.nav_music", en.nav_music),
+            ("pt.download", pt.download),
+            ("en.download", en.download),
+            ("pt.queue_title", pt.queue_title),
+            ("en.queue_title", en.queue_title),
+        ] {
+            assert!(!v.trim().is_empty(), "{tag} não pode ser vazio");
+        }
+    }
+
+    #[test]
+    fn lang_serializes_roundtrip() {
+        let json = serde_json::to_string(&Lang::En).unwrap();
+        let back: Lang = serde_json::from_str(&json).unwrap();
+        assert!(back == Lang::En);
+    }
+}
+
 static PT: Strings = Strings {
     nav_home: "Início",
     nav_music: "Baixar Música",

@@ -20,3 +20,21 @@ pub fn data_dir() -> PathBuf {
         new
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // data_dir depende da máquina; o invariante testável é o contrato do
+    // rebrand: sempre uma das duas pastas, e estável entre chamadas.
+    #[test]
+    fn data_dir_is_stable_and_uses_known_names() {
+        let d = data_dir();
+        let name = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(
+            name == "LumenStream" || name == "LumenDownloader",
+            "nome inesperado: {name}"
+        );
+        assert_eq!(data_dir(), d, "chamadas repetidas devem ser idempotentes");
+    }
+}

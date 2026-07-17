@@ -150,3 +150,117 @@ pub(super) fn ytdlp_error(stderr: &[u8]) -> String {
         .unwrap_or("erro desconhecido");
     format!("yt-dlp: {}", last)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_url_requires_http_scheme() {
+        assert!(is_valid_url("https://youtube.com/watch?v=x"));
+        assert!(is_valid_url("  http://a.com  "));
+        assert!(!is_valid_url("youtube.com/watch"));
+        assert!(!is_valid_url(""));
+    }
+
+    #[test]
+    fn looks_like_url_heuristic() {
+        assert!(looks_like_url("youtube.com/watch"));
+        assert!(!looks_like_url("apenas texto com espaço.com"));
+        assert!(!looks_like_url("semponto"));
+        assert!(!looks_like_url(""));
+    }
+
+    #[test]
+    fn friendly_error_maps_known_patterns() {
+        assert_eq!(
+            friendly_error("ERROR: Private video"),
+            "Vídeo privado ou que exige login."
+        );
+        assert_eq!(
+            friendly_error("ERROR: Sign in to confirm your age"),
+            "Vídeo privado ou que exige login."
+        );
+        assert_eq!(friendly_error("Video unavailable"), "Vídeo indisponível.");
+        assert_eq!(
+            friendly_error("HTTP Error 404: Not Found"),
+            "Conteúdo não encontrado (404)."
+        );
+        assert_eq!(
+            friendly_error("getaddrinfo failed"),
+            "Falha de conexão. Verifique sua internet."
+        );
+    }
+
+    #[test]
+    fn friendly_error_falls_back_to_last_line() {
+        assert_eq!(
+            friendly_error("linha 1\nERROR: boom\n\n"),
+            "Falha no download: ERROR: boom"
+        );
+        assert_eq!(friendly_error(""), "Falha no download: erro desconhecido");
+    }
+
+    #[test]
+    fn percent_parses_download_lines() {
+        let line = "[download]  45.2% of 100.00MiB at 1.00MiB/s ETA 00:30";
+        assert_eq!(parse_ytdlp_percent(line), Some(0.452));
+        // Prefixo de índice de formato (download paralelo de vídeo+áudio).
+        assert_eq!(parse_ytdlp_percent(&format!("1: {line}")), Some(0.452));
+    }
+
+    #[test]
+    fn percent_ignores_other_lines_and_clamps() {
+        assert_eq!(parse_ytdlp_percent("[youtube] extraindo"), None);
+        assert_eq!(parse_ytdlp_percent("[download] sem porcentagem"), None);
+        assert_eq!(
+            parse_ytdlp_percent("[download] 150.0% of ~10MiB"),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn speed_parses_binary_and_decimal_units() {
+        let l = |s: &str| format!("[download] 10.0% of 1MiB at {s} ETA 00:01");
+        assert_eq!(parse_ytdlp_speed(&l("1.00MiB/s")), Some(1024.0 * 1024.0));
+        assert_eq!(parse_ytdlp_speed(&l("500.00KiB/s")), Some(500.0 * 1024.0));
+        assert_eq!(parse_ytdlp_speed(&l("2MB/s")), Some(2_000_000.0));
+        assert_eq!(parse_ytdlp_speed("[youtube] x"), None);
+    }
+
+    #[test]
+    fn eta_parses_mm_ss_and_hh_mm_ss() {
+        assert_eq!(
+            parse_ytdlp_eta("[download] 10.0% of 1MiB at 1MiB/s ETA 00:30"),
+            Some(30)
+        );
+        assert_eq!(
+            parse_ytdlp_eta("[download] 10.0% of 1MiB at 1MiB/s ETA 1:02:03"),
+            Some(3723)
+        );
+        assert_eq!(parse_ytdlp_eta("[download] sem eta"), None);
+    }
+
+    #[test]
+    fn size_parses_downloaded_total() {
+        assert_eq!(
+            parse_ytdlp_size("[download]  30.56MiB at 2.00MiB/s"),
+            Some((30.56f64 * 1024.0 * 1024.0) as u64)
+        );
+        assert_eq!(parse_ytdlp_size("[download] 100% concluído"), None);
+    }
+
+    #[test]
+    fn strip_format_index_only_removes_short_numeric_prefix() {
+        assert_eq!(strip_format_index("1: [download] x"), "[download] x");
+        assert_eq!(strip_format_index("[download] x"), "[download] x");
+        // "1234: " não é índice de formato (mais de 3 dígitos).
+        assert_eq!(strip_format_index("1234: resto"), "1234: resto");
+    }
+
+    #[test]
+    fn ytdlp_error_uses_last_nonempty_line() {
+        assert_eq!(ytdlp_error(b"aviso\nerro fatal\n\n"), "yt-dlp: erro fatal");
+        assert_eq!(ytdlp_error(b""), "yt-dlp: erro desconhecido");
+    }
+}

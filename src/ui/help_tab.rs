@@ -6,20 +6,14 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let s = crate::ui::i18n::s(app.config.lang);
     let pt = app.config.lang == Lang::Pt;
 
-    ui.label(
-        egui::RichText::new(s.nav_help)
-            .color(theme::text())
-            .size(30.0)
-            .strong(),
-    );
-    ui.label(
-        egui::RichText::new(if pt {
+    theme::page_header(
+        ui,
+        s.nav_help,
+        if pt {
             "Perguntas frequentes, atalhos e ferramentas de suporte."
         } else {
             "FAQ, shortcuts and support tools."
-        })
-        .color(theme::text_muted())
-        .size(14.0),
+        },
     );
     ui.add_space(20.0);
 

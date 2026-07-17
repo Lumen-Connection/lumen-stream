@@ -312,6 +312,12 @@ impl DownloadEngine {
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
 
+            // No Unix, o yt-dlp vira líder do próprio process group: assim o
+            // kill_tree consegue matar o grupo inteiro (yt-dlp + ffmpeg filho),
+            // como o taskkill /T faz no Windows.
+            #[cfg(unix)]
+            cmd.process_group(0);
+
             let mut child = cmd.spawn()?;
             let child_pid = child.id();
             if let Some(pid) = child_pid {

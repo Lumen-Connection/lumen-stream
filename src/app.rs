@@ -58,7 +58,6 @@ pub struct App {
     pub selected_game: Option<crate::games::GameTarget>,
     pub game_sync_selected: std::collections::HashSet<i64>,
     pub orphans: Option<Vec<PathBuf>>,
-    pub profile_draft: crate::config::settings::DownloadProfile,
     pub fullscreen: bool,
     pub last_download: Option<(String, MediaType)>,
     pub pending_clear: Option<String>,
@@ -164,8 +163,15 @@ impl Tab {
             Tab::Help => "help",
         }
     }
+    /// Abas disponíveis nesta plataforma. A aba Nuvem é exclusiva do Windows
+    /// (o fluxo assume apps de sincronização com letra de unidade/pastas do
+    /// Windows) — no Linux ela sai da navegação.
+    pub fn visible(&self) -> bool {
+        !(cfg!(target_os = "linux") && matches!(self, Tab::Cloud))
+    }
+
     pub fn from_id(s: &str) -> Tab {
-        match s {
+        let tab = match s {
             "music" => Tab::Music,
             "video" => Tab::Video,
             "converter" => Tab::Converter,
@@ -179,6 +185,11 @@ impl Tab {
             "settings" => Tab::Settings,
             "help" => Tab::Help,
             _ => Tab::Home,
+        };
+        if tab.visible() {
+            tab
+        } else {
+            Tab::Home
         }
     }
 }
@@ -331,12 +342,6 @@ impl App {
             selected_game: None,
             game_sync_selected: std::collections::HashSet::new(),
             orphans: None,
-            profile_draft: crate::config::settings::DownloadProfile {
-                name: String::new(),
-                media_type: "video".to_string(),
-                format: "mp4".to_string(),
-                quality: "best".to_string(),
-            },
             fullscreen: false,
             last_download: None,
             pending_clear: None,
@@ -1014,7 +1019,6 @@ impl App {
             op.phase = DownloadPhase::Idle;
             (op.folder_path.clone(), op.file_name.clone())
         };
-        // Limpa os temporários da gravação descartada.
         if let Some(stem) = std::path::Path::new(&file_name).file_stem().and_then(|s| s.to_str()) {
             crate::download::engine::cleanup_partials(&folder, stem);
         }
@@ -1438,7 +1442,6 @@ impl App {
             self.restyle = true;
         }
 
-        // Limpa o estado de gravação de live quando o download termina.
         if self.live_started.is_some() {
             let downloading = self
                 .operation
@@ -1612,11 +1615,11 @@ impl App {
                 .position(|t| *t == self.active_tab)
                 .unwrap_or(0);
             let n = TAB_ORDER.len();
-            let next = if cycle_next {
-                (cur + 1) % n
-            } else {
-                (cur + n - 1) % n
-            };
+            let step = if cycle_next { 1 } else { n - 1 };
+            let mut next = (cur + step) % n;
+            while !TAB_ORDER[next].visible() && next != cur {
+                next = (next + step) % n;
+            }
             self.active_tab = TAB_ORDER[next];
         }
 
@@ -1761,7 +1764,6 @@ pub fn make_qr_texture(ctx: &egui::Context, data: &str) -> Option<egui::TextureH
 }
 
 pub fn load_brand_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    // Transparente: sobreposto ao fundo do app (sidebar/onboarding).
     let bytes = include_bytes!("../assets/LogoOficialLumenStreamTransparente2.png");
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
@@ -1770,7 +1772,6 @@ pub fn load_brand_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 }
 
 pub fn load_connection_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    // Logo do estúdio, usada no crédito "Lumen Connection" da barra lateral.
     let bytes = include_bytes!("../assets/LUMEN CONNECTION.png");
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();

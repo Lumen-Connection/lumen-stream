@@ -9,12 +9,7 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let pt = app.config.lang == Lang::Pt;
     let fmt = crate::download::engine::format_size;
 
-    ui.label(
-        egui::RichText::new(s.nav_stats)
-            .color(theme::text())
-            .size(30.0)
-            .strong(),
-    );
+    theme::page_header(ui, s.nav_stats, "");
     ui.add_space(20.0);
 
     let all = app.active_history();
