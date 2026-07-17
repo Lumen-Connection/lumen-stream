@@ -1,6 +1,6 @@
 [package]
 name = "lumen-stream"
-version = "1.0.0
+version = "1.0.0"
 edition = "2024"
 description = "Hub de download de mídias focado em throughput, manipulação segura de arquivos e zero rastreamento. Projeto comunitário Lumen Connection."
 repository = "https://github.com/Lumen-Connection/lumen-stream"
