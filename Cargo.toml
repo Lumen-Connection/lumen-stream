@@ -7,8 +7,13 @@ repository = "https://github.com/Lumen-Connection/lumen-stream"
 license = "AGPL-3.0-only"
 authors = ["Lumen Connection"]
 
+# O crate yt-dlp exige lofty ^0.23.2, mas toda a série 0.23 foi yanked do
+# crates.io — sem patch, o projeto não resolve em máquinas sem cache (CI, clones
+# novos). A tag no repositório OFICIAL do lofty é o espelho durável do release
+# (o fork boul2gom/lofty-rs usado antes foi apagado e quebrou o build).
+# Remover quando o yt-dlp migrar para lofty >= 0.24.
 [patch.crates-io]
-lofty = { git = "https://github.com/boul2gom/lofty-rs", rev = "f8eef9d98b6fabe8514052375d16eb66e696fd88" }
+lofty = { git = "https://github.com/Serial-ATA/lofty-rs", tag = "0.23.3" }
 
 [build-dependencies]
 winresource = "0.1"

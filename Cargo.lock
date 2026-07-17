@@ -2791,8 +2791,8 @@ dependencies = [
 
 [[package]]
 name = "lofty"
-version = "0.23.2"
-source = "git+https://github.com/boul2gom/lofty-rs?rev=f8eef9d98b6fabe8514052375d16eb66e696fd88#f8eef9d98b6fabe8514052375d16eb66e696fd88"
+version = "0.23.3"
+source = "git+https://github.com/Serial-ATA/lofty-rs?tag=0.23.3#f3fcfd031067ee5ba42a8745a42fed031ff0d7aa"
 dependencies = [
  "byteorder",
  "data-encoding",
@@ -2800,13 +2800,13 @@ dependencies = [
  "lofty_attr",
  "log",
  "ogg_pager",
- "pastey",
+ "paste",
 ]
 
 [[package]]
 name = "lofty_attr"
 version = "0.12.0"
-source = "git+https://github.com/boul2gom/lofty-rs?rev=f8eef9d98b6fabe8514052375d16eb66e696fd88#f8eef9d98b6fabe8514052375d16eb66e696fd88"
+source = "git+https://github.com/Serial-ATA/lofty-rs?tag=0.23.3#f3fcfd031067ee5ba42a8745a42fed031ff0d7aa"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3330,7 +3330,7 @@ dependencies = [
 [[package]]
 name = "ogg_pager"
 version = "0.7.1"
-source = "git+https://github.com/boul2gom/lofty-rs?rev=f8eef9d98b6fabe8514052375d16eb66e696fd88#f8eef9d98b6fabe8514052375d16eb66e696fd88"
+source = "git+https://github.com/Serial-ATA/lofty-rs?tag=0.23.3#f3fcfd031067ee5ba42a8745a42fed031ff0d7aa"
 dependencies = [
  "byteorder",
 ]
@@ -3447,12 +3447,6 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
-
-[[package]]
-name = "pastey"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pathdiff"
