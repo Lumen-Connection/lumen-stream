@@ -1,0 +1,15 @@
+name: CI                      # nome que aparece na aba Actions
+
+on:
+  push:
+    branches: [main]          # dispara a cada push na main
+  pull_request:               # e em PRs (útil quando houver colaboradores)
+
+jobs:
+  test:
+    runs-on: windows-latest   # VM Windows, igual ao ambiente dos seus usuários
+    steps:
+      - uses: actions/checkout@v4   # passo 1: clona seu código na VM
+
+      - name: Rodar testes
+        run: cargo test               # passo 2: os seus 76 testes
