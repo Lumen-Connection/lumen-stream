@@ -103,11 +103,16 @@ fn card_accessibility(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label(if pt { "Escala da interface" } else { "UI scale" });
-            let mut scale = app.config.ui_scale;
+            let mut scale_pct = (app.config.ui_scale * 100.0).round();
             if ui
-                .add(egui::Slider::new(&mut scale, 0.8..=1.6).step_by(0.1))
+                .add(
+                    egui::Slider::new(&mut scale_pct, 80.0..=160.0)
+                        .step_by(10.0)
+                        .suffix("%"),
+                )
                 .changed()
             {
+                let scale = scale_pct / 100.0;
                 app.config.ui_scale = scale;
                 ui.ctx().set_pixels_per_point(scale);
                 *changed = true;

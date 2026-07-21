@@ -1460,7 +1460,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
             }
             let thumb_tex = app.thumb_texture.clone();
 
-            let mut win_height =
+            let mut win_height: f32 =
                 if preview.as_ref().and_then(|p| p.thumbnail.as_ref()).is_some() {
                     580.0
                 } else {
@@ -1469,16 +1469,30 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
             if new_clip_enabled {
                 win_height += 40.0;
             }
+            // Clamp to the viewport so the dialog never gets positioned
+            // partially off-screen on displays smaller than 1920x1080
+            // (e.g. 1366x768), where a fixed 500x580+ window would push its
+            // header or the Confirmar/Cancelar row past the visible area.
+            let screen_rect = ctx.screen_rect();
+            let win_width = 500.0_f32.min(screen_rect.width() - 24.0).max(280.0);
+            win_height = win_height.min(screen_rect.height() - 24.0).max(240.0);
+            // Reserve space for the fixed header (title + separator) and the
+            // fixed footer (Cancelar/Confirmar row) around the scroll area.
+            let scroll_height = (win_height - 170.0).max(120.0);
             egui::Window::new(window_title)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .resizable(false)
-                .fixed_size([500.0, win_height])
+                .fixed_size([win_width, win_height])
                 .show(ctx, |ui| {
                     ui.label(
                         egui::RichText::new(window_title).size(18.0).color(theme::accent()),
                     );
                     ui.separator();
                     ui.add_space(6.0);
+
+                    egui::ScrollArea::vertical()
+                        .max_height(scroll_height)
+                        .show(ui, |ui| {
 
                     if is_convert {
                         ui.label(s.f_source);
@@ -1785,6 +1799,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                             ui.checkbox(&mut new_live_from_start, s.live_label);
                         }
                     }
+                        });
                     ui.add_space(12.0);
 
                     ui.horizontal(|ui| {
