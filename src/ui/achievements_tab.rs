@@ -218,7 +218,7 @@ fn badge_card(ui: &mut egui::Ui, b: &Badge, pt: bool, desc_h: f32) {
     egui::Frame::none()
         .fill(fill)
         .rounding(egui::Rounding::same(theme::CARD_ROUNDING))
-        .stroke(Stroke::new(1.0, brd))
+        .stroke(Stroke::new(1.0_f32, brd))
         .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
             ui.set_width(CARD_W);

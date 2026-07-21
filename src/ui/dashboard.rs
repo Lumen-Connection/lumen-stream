@@ -429,11 +429,11 @@ fn sidebar_icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Re
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0, 28.0), egui::Sense::click());
 
     let (fill, stroke) = if resp.is_pointer_button_down_on() {
-        (theme::accent(), egui::Stroke::new(1.0, theme::accent()))
+        (theme::accent(), egui::Stroke::new(1.0_f32, theme::accent()))
     } else if resp.hovered() {
-        (theme::bg_card_hover(), egui::Stroke::new(1.0, theme::accent()))
+        (theme::bg_card_hover(), egui::Stroke::new(1.0_f32, theme::accent()))
     } else {
-        (Color32::TRANSPARENT, egui::Stroke::new(1.0, theme::border()))
+        (Color32::TRANSPARENT, egui::Stroke::new(1.0_f32, theme::border()))
     };
     ui.painter()
         .rect(rect, egui::Rounding::same(8.0), fill, stroke);
@@ -877,7 +877,7 @@ fn render_toasts(app: &mut App, ctx: &egui::Context) {
                     egui::Frame::none()
                         .fill(theme::bg_card())
                         .rounding(egui::Rounding::same(8.0))
-                        .stroke(egui::Stroke::new(1.0, accent))
+                        .stroke(egui::Stroke::new(1.0_f32, accent))
                         .inner_margin(egui::Margin::symmetric(14.0, 10.0))
                         .show(ui, |ui| {
                             ui.set_max_width(360.0);
@@ -1023,7 +1023,7 @@ fn storage_footer(ui: &mut egui::Ui, app: &App) {
     let frame = egui::Frame::none()
         .fill(theme::bg_card())
         .rounding(egui::Rounding::same(10.0))
-        .stroke(egui::Stroke::new(1.0, theme::border()))
+        .stroke(egui::Stroke::new(1.0_f32, theme::border()))
         .inner_margin(egui::Margin::symmetric(12.0, 10.0));
     frame.show(ui, |ui| {
         let (rect, _) =
@@ -1058,7 +1058,7 @@ fn storage_footer(ui: &mut egui::Ui, app: &App) {
         let center = egui::pos2(rect.max.x - 18.0, cy);
         let radius = 15.0;
         ui.painter()
-            .circle_stroke(center, radius, egui::Stroke::new(3.0, theme::bg_card_hover()));
+            .circle_stroke(center, radius, egui::Stroke::new(3.0_f32, theme::bg_card_hover()));
         draw_arc(ui.painter(), center, radius, used_frac, theme::accent(), 3.0);
         ui.painter().text(
             center,
@@ -1219,7 +1219,7 @@ fn sparkline(ui: &mut egui::Ui, data: &[f32]) {
         })
         .collect();
     ui.painter()
-        .add(egui::Shape::line(pts, egui::Stroke::new(2.0, theme::accent())));
+        .add(egui::Shape::line(pts, egui::Stroke::new(2.0_f32, theme::accent())));
 }
 
 fn render_preview(
@@ -1236,9 +1236,12 @@ fn render_preview(
     ui.add_space(4.0);
     if let Some(tex) = thumb {
         let [tw, th] = tex.size();
-        let w = 200.0_f32;
-        let h = w * th as f32 / tw.max(1) as f32;
-        ui.add(egui::Image::from_texture((tex.id(), egui::vec2(w, h))));
+        // Keep portrait thumbnails from making the fixed-size dialog taller
+        // than the viewport. Both dimensions are caps, not a forced aspect.
+        let scale = (200.0_f32 / tw.max(1) as f32)
+            .min(140.0_f32 / th.max(1) as f32);
+        let size = egui::vec2(tw as f32 * scale, th as f32 * scale);
+        ui.add(egui::Image::from_texture((tex.id(), size)));
         ui.add_space(4.0);
     }
     ui.horizontal(|ui| {
@@ -1416,16 +1419,22 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
             let mut new_live_from_start = live_from_start;
 
             let is_convert = media_type == MediaType::Convert;
-            let formats: Vec<&str> = match media_type {
-                MediaType::Music => vec!["mp3", "m4a", "opus", "flac"],
-                MediaType::Video => vec!["mp4", "mkv", "webm"],
+            let formats: Vec<(&str, &str)> = match media_type {
+                MediaType::Music => vec![("mp3", "mp3"), ("m4a", "m4a"), ("opus", "opus"), ("flac", "flac")],
+                MediaType::Video => crate::download::engine::video_profiles()
+                    .iter()
+                    .map(|profile| (profile.extension, profile.label))
+                    .collect(),
                 MediaType::Convert => {
                     crate::download::engine::output_formats(
                         crate::download::engine::categorize(&source_file),
                     )
+                    .into_iter()
+                    .map(|format| (format, format))
+                    .collect()
                 }
             };
-            let qualities = vec!["best", "medium", "high"];
+            let qualities = vec!["best", "high", "medium"];
             let window_title = if is_convert { s.cfg_convert } else { s.cfg_download };
 
             if let Some(pv) = &preview {
@@ -1537,11 +1546,11 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
 
                     ui.label(if is_convert { s.f_format_to } else { s.f_format });
                     ui.horizontal_wrapped(|ui| {
-                        for fmt in &formats {
-                            let is_selected = new_format == *fmt;
+                        for (format, label) in &formats {
+                            let is_selected = new_format == *format;
                             if ui
                                 .add(
-                                    egui::Button::new(*fmt).fill(if is_selected {
+                                    egui::Button::new(*label).fill(if is_selected {
                                         theme::accent()
                                     } else {
                                         theme::bg_card()
@@ -1549,7 +1558,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 )
                                 .clicked()
                             {
-                                new_format = fmt.to_string();
+                                new_format = (*format).to_string();
                             }
                         }
                     });

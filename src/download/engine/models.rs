@@ -120,6 +120,45 @@ pub struct FormatRow {
     pub size: Option<i64>,
 }
 
+/// A video-download profile. The extension is intentionally kept as the
+/// persisted value so existing config, queue and history records remain valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoProfile {
+    pub extension: &'static str,
+    pub label: &'static str,
+    pub video_encoder: &'static str,
+    pub audio_encoder: &'static str,
+}
+
+const VIDEO_PROFILES: [VideoProfile; 3] = [
+    VideoProfile {
+        extension: "mp4",
+        label: "H.264 (MP4)",
+        video_encoder: "libx264",
+        audio_encoder: "aac",
+    },
+    VideoProfile {
+        extension: "mkv",
+        label: "AV1 (MKV)",
+        video_encoder: "libaom-av1",
+        audio_encoder: "flac",
+    },
+    VideoProfile {
+        extension: "webm",
+        label: "VP9 (WebM)",
+        video_encoder: "libvpx-vp9",
+        audio_encoder: "libopus",
+    },
+];
+
+pub fn video_profiles() -> &'static [VideoProfile] {
+    &VIDEO_PROFILES
+}
+
+pub fn video_profile(extension: &str) -> Option<&'static VideoProfile> {
+    VIDEO_PROFILES.iter().find(|profile| profile.extension == extension)
+}
+
 pub fn organize_subfolder(organize_by: &str, media_type: &str, channel: &str) -> Option<String> {
     match organize_by {
         "type" => Some(
@@ -301,5 +340,20 @@ mod tests {
         assert_eq!(o.concurrent_fragments, 4);
         assert!(!o.is_live);
         assert!(o.stop.is_none());
+    }
+
+    #[test]
+    fn video_profiles_keep_stable_extensions_and_descriptive_labels() {
+        let profiles = video_profiles();
+        assert_eq!(
+            profiles
+                .iter()
+                .map(|profile| profile.extension)
+                .collect::<Vec<_>>(),
+            vec!["mp4", "mkv", "webm"]
+        );
+        assert_eq!(video_profile("mp4").unwrap().label, "H.264 (MP4)");
+        assert_eq!(video_profile("mkv").unwrap().label, "AV1 (MKV)");
+        assert_eq!(video_profile("webm").unwrap().label, "VP9 (WebM)");
     }
 }

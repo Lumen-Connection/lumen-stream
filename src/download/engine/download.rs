@@ -77,7 +77,26 @@ impl DownloadEngine {
         }
         let mut out = PathBuf::from(output_path);
         out.set_extension(&opts.format);
-        self.ytdlp_download(url, &out, &opts, on_progress).await
+        if opts.is_audio {
+            return self.ytdlp_download(url, &out, &opts, on_progress).await;
+        }
+
+        let source = video_source_path(&out);
+        let source = self.ytdlp_download(url, &source, &opts, on_progress).await?;
+
+        let transcode = self.transcode_video_profile(&source, &out, &opts.format).await;
+        match transcode {
+            Ok(()) => {
+                move_subtitle_sidecars(&source, &out);
+                let _ = std::fs::remove_file(&source);
+                Ok(out)
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&source);
+                remove_subtitle_sidecars(&source);
+                Err(error)
+            }
+        }
     }
 
     pub(super) fn ytdlp_path(&self) -> PathBuf {
@@ -182,7 +201,14 @@ impl DownloadEngine {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "download".to_string());
         let template = folder.join(format!("{}.%(ext)s", stem));
-        let final_ext = opts.format.clone();
+        // Video downloads always merge their source streams into a temporary
+        // Matroska file. The requested extension is applied later by the
+        // profile transcode, which is what guarantees codecs as well.
+        let final_ext = out
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or(&opts.format)
+            .to_string();
 
         crate::applog::info(&format!(
             "download: url={} format={} audio={} quality={} max_height={:?} rate={:?} frags={} clip={:?}",
@@ -266,15 +292,11 @@ impl DownloadEngine {
                     .arg("--convert-thumbnails")
                     .arg("jpg");
             } else {
-                let selector = match opts.format.as_str() {
-                    "mp4" => "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/bv*+ba/b",
-                    "webm" => "bv*[vcodec^=vp9]+ba/bv*+ba/b",
-                    _ => "bv*+ba/b",
-                };
+                let selector = "bv*+ba/b";
                 cmd.arg("-f")
                     .arg(selector)
                     .arg("--merge-output-format")
-                    .arg(&opts.format);
+                    .arg(&final_ext);
 
                 if let Some(h) = opts.max_height {
                     cmd.arg("-S").arg(format!("res:{}", h));
@@ -771,6 +793,81 @@ impl DownloadEngine {
     }
 }
 
+fn video_source_path(output: &Path) -> PathBuf {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let stem = output
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".to_string());
+    parent.join(format!("{}.lumen-source.mkv", stem))
+}
+
+fn move_subtitle_sidecars(source: &Path, output: &Path) {
+    let Some(folder) = source.parent() else {
+        return;
+    };
+    let source_stem = source
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let output_stem = output
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if source_stem.is_empty() || output_stem.is_empty() {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_srt = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("srt"));
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !is_srt || !name.starts_with(&source_stem) {
+            continue;
+        }
+        let destination = folder.join(format!("{}{}", output_stem, &name[source_stem.len()..]));
+        let _ = std::fs::remove_file(&destination);
+        let _ = std::fs::rename(path, destination);
+    }
+}
+
+fn remove_subtitle_sidecars(source: &Path) {
+    let Some(folder) = source.parent() else {
+        return;
+    };
+    let source_stem = source
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if source_stem.is_empty() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_srt = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("srt"));
+        if is_srt
+            && entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&source_stem)
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct YtJson {
     title: Option<String>,
@@ -798,4 +895,15 @@ struct YtFormat {
     filesize: Option<i64>,
     filesize_approx: Option<i64>,
     format_note: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_source_uses_a_temporary_mkv_next_to_final_output() {
+        let source = video_source_path(Path::new("D:/downloads/clip.mp4"));
+        assert_eq!(source, PathBuf::from("D:/downloads/clip.lumen-source.mkv"));
+    }
 }

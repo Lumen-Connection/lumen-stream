@@ -22,7 +22,10 @@ pub fn cleanup_partials(folder: &Path, stem: &str) {
             // precisa ser comparado também em minúsculas.
             let is_temp_ext = matches!(ext.as_str(), "part" | "ytdl" | "temp" | "rawaudio" | "recseg")
                 || ext.starts_with("part-frag");
-            if name.starts_with(stem) && is_temp_ext {
+            let is_profile_work_file = name.starts_with(stem)
+                && name[stem.len()..].starts_with('.')
+                && (name.contains(".lumen-source.") || name.contains(".lumen-transcoding."));
+            if name.starts_with(stem) && (is_temp_ext || is_profile_work_file) {
                 let _ = std::fs::remove_file(&path);
             }
         }
@@ -246,10 +249,18 @@ mod tests {
         let rm_part = write(&d, "video.part", b"x");
         let rm_ytdl = write(&d, "video.ytdl", b"x");
         let rm_frag = write(&d, "video.mp4.part-Frag001", b"x");
+        let rm_source = write(&d, "video.lumen-source.mkv", b"x");
+        let rm_transcoding = write(&d, "video.lumen-transcoding.mp4", b"x");
         cleanup_partials(&d, "video");
         assert!(keep_final.exists(), "arquivo final deve ficar");
         assert!(keep_other.exists(), "temp de outro stem deve ficar");
-        assert!(!rm_part.exists() && !rm_ytdl.exists() && !rm_frag.exists());
+        assert!(
+            !rm_part.exists()
+                && !rm_ytdl.exists()
+                && !rm_frag.exists()
+                && !rm_source.exists()
+                && !rm_transcoding.exists()
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

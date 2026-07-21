@@ -207,7 +207,7 @@ pub fn render(
                                 let ui = &mut c[k];
                                 egui::Frame::none()
                                     .fill(theme::bg_card())
-                                    .stroke(egui::Stroke::new(1.0, theme::border()))
+                                    .stroke(egui::Stroke::new(1.0_f32, theme::border()))
                                     .rounding(egui::Rounding::same(8.0))
                                     .inner_margin(egui::Margin::same(10.0))
                                     .show(ui, |ui| {

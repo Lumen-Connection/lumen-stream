@@ -110,10 +110,10 @@ pub fn apply(ctx: &egui::Context) {
     v.error_fg_color = danger();
 
     v.selection.bg_fill = accent().linear_multiply(0.45);
-    v.selection.stroke = Stroke::new(1.0, accent());
+    v.selection.stroke = Stroke::new(1.0_f32, accent());
 
     v.window_fill = bg_card();
-    v.window_stroke = Stroke::new(1.0, border());
+    v.window_stroke = Stroke::new(1.0_f32, border());
     v.window_rounding = Rounding::same(12.0);
     v.window_shadow = egui::epaint::Shadow {
         offset: egui::vec2(0.0, 8.0),
@@ -131,26 +131,26 @@ pub fn apply(ctx: &egui::Context) {
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = bg_card();
     w.noninteractive.weak_bg_fill = bg_card();
-    w.noninteractive.bg_stroke = Stroke::new(1.0, border());
-    w.noninteractive.fg_stroke = Stroke::new(1.0, text_muted());
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, border());
+    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, text_muted());
     w.noninteractive.rounding = Rounding::same(8.0);
 
     w.inactive.bg_fill = bg_input();
     w.inactive.weak_bg_fill = bg_input();
-    w.inactive.bg_stroke = Stroke::new(1.0, border());
-    w.inactive.fg_stroke = Stroke::new(1.0, text());
+    w.inactive.bg_stroke = Stroke::new(1.0_f32, border());
+    w.inactive.fg_stroke = Stroke::new(1.0_f32, text());
     w.inactive.rounding = Rounding::same(8.0);
 
     w.hovered.bg_fill = bg_card_hover();
     w.hovered.weak_bg_fill = bg_card_hover();
-    w.hovered.bg_stroke = Stroke::new(1.0, accent());
-    w.hovered.fg_stroke = Stroke::new(1.0, text());
+    w.hovered.bg_stroke = Stroke::new(1.0_f32, accent());
+    w.hovered.fg_stroke = Stroke::new(1.0_f32, text());
     w.hovered.rounding = Rounding::same(8.0);
 
     w.active.bg_fill = accent();
     w.active.weak_bg_fill = accent();
-    w.active.bg_stroke = Stroke::new(1.0, accent());
-    w.active.fg_stroke = Stroke::new(1.0, text());
+    w.active.bg_stroke = Stroke::new(1.0_f32, accent());
+    w.active.fg_stroke = Stroke::new(1.0_f32, text());
     w.active.rounding = Rounding::same(8.0);
 
     if is_compact() {
@@ -200,7 +200,7 @@ pub fn card_frame() -> egui::Frame {
     egui::Frame::none()
         .fill(bg_card())
         .rounding(Rounding::same(CARD_ROUNDING))
-        .stroke(Stroke::new(1.0, border()))
+        .stroke(Stroke::new(1.0_f32, border()))
         .inner_margin(egui::Margin::same(CARD_MARGIN))
 }
 

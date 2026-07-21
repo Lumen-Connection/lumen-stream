@@ -38,18 +38,21 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
         });
         ui.add_space(6.0);
 
-        let formats: &[&str] = if app.batch_media_type == MediaType::Music {
-            &["mp3", "m4a", "opus", "flac"]
+        let formats: Vec<(&str, &str)> = if app.batch_media_type == MediaType::Music {
+            vec![("mp3", "mp3"), ("m4a", "m4a"), ("opus", "opus"), ("flac", "flac")]
         } else {
-            &["mp4", "mkv", "webm"]
+            crate::download::engine::video_profiles()
+                .iter()
+                .map(|profile| (profile.extension, profile.label))
+                .collect()
         };
         ui.horizontal(|ui| {
             ui.label("Formato:");
-            for fmt in formats {
-                let selected = app.batch_format == *fmt;
+            for (format, label) in formats {
+                let selected = app.batch_format == format;
                 let fill = if selected { theme::accent() } else { theme::bg_card() };
-                if ui.add(egui::Button::new(*fmt).fill(fill)).clicked() {
-                    app.batch_format = fmt.to_string();
+                if ui.add(egui::Button::new(label).fill(fill)).clicked() {
+                    app.batch_format = format.to_string();
                 }
             }
         });
@@ -57,7 +60,7 @@ pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
         ui.horizontal(|ui| {
             ui.label(s.settings_quality);
-            for q in ["best", "medium", "high"] {
+            for q in ["best", "high", "medium"] {
                 let selected = app.batch_quality == q;
                 let fill = if selected { theme::accent() } else { theme::bg_card() };
                 if ui.add(egui::Button::new(q).fill(fill)).clicked() {

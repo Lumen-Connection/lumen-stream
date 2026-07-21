@@ -22,8 +22,8 @@ mod ytdlp_util;
 pub use audio_tags::{read_audio_tags, write_audio_tags, AudioTags};
 pub use fs_utils::{cleanup_partials, cleanup_temp_dir, part_bytes};
 pub use models::{
-    categorize, format_size, organize_subfolder, output_formats, DownloadOptions, FileCategory,
-    FormatRow, NetStats, Progress, VideoPreview,
+    categorize, format_size, organize_subfolder, output_formats, video_profile, video_profiles,
+    DownloadOptions, FileCategory, FormatRow, NetStats, Progress, VideoPreview, VideoProfile,
 };
 pub use office::engine_status;
 pub use text_utils::{apply_template, sanitize_filename, smart_clean_name};

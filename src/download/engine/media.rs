@@ -4,6 +4,65 @@ use super::models::AudioMeta;
 use super::DownloadEngine;
 
 impl DownloadEngine {
+    /// Re-encodes a downloaded video source into one of Lumen Stream's named
+    /// video profiles. This is deliberately separate from yt-dlp's merge step:
+    /// a container extension alone does not guarantee the stream codecs.
+    pub(super) async fn transcode_video_profile(
+        &self,
+        input: &Path,
+        output: &Path,
+        format: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = super::video_profile(format)
+            .ok_or_else(|| format!("perfil de vídeo desconhecido: {}", format))?;
+        let temp_output = profile_temp_output(output);
+        let _ = std::fs::remove_file(&temp_output);
+
+        let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
+        cmd.arg("-y")
+            .arg("-i")
+            .arg(input)
+            .arg("-map")
+            .arg("0:v:0")
+            .arg("-map")
+            .arg("0:a?")
+            .arg("-map_metadata")
+            .arg("0")
+            .args(video_profile_ffmpeg_args(profile))
+            .arg(&temp_output);
+        cmd.kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+
+        let child = cmd.spawn()?;
+        let pid = child.id();
+        if let Some(pid) = pid {
+            self.dl_pids.lock().unwrap().push(pid);
+        }
+        let result = child.wait_with_output().await;
+        if let Some(pid) = pid {
+            self.dl_pids.lock().unwrap().retain(|running| *running != pid);
+        }
+        let result = result?;
+
+        if !result.status.success()
+            || std::fs::metadata(&temp_output)
+                .map(|metadata| metadata.len() == 0)
+                .unwrap_or(true)
+        {
+            let _ = std::fs::remove_file(&temp_output);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            let last = stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("");
+            return Err(format!("ffmpeg falhou ao gerar {}: {}", profile.label, last).into());
+        }
+
+        // Never expose a partial final file. Replace an existing target only
+        // after FFmpeg successfully produced a non-empty temporary output.
+        let _ = std::fs::remove_file(output);
+        std::fs::rename(&temp_output, output)?;
+        Ok(())
+    }
+
     pub async fn generate_thumbnail(
         &self,
         video: &str,
@@ -494,5 +553,53 @@ impl DownloadEngine {
             return Err(format!("ffmpeg falhou ao converter: {}", last).into());
         }
         Ok(())
+    }
+}
+
+fn profile_temp_output(output: &Path) -> PathBuf {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let stem = output
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".to_string());
+    let ext = output.extension().and_then(|value| value.to_str()).unwrap_or("mkv");
+    parent.join(format!("{}.lumen-transcoding.{}", stem, ext))
+}
+
+fn video_profile_ffmpeg_args(profile: &super::VideoProfile) -> Vec<&'static str> {
+    match profile.extension {
+        "mp4" => vec![
+            "-c:v", profile.video_encoder, "-crf", "23", "-preset", "medium", "-pix_fmt",
+            "yuv420p", "-c:a", profile.audio_encoder, "-b:a", "192k", "-movflags", "+faststart",
+        ],
+        "mkv" => vec![
+            "-c:v", profile.video_encoder, "-crf", "30", "-b:v", "0", "-cpu-used", "6", "-c:a",
+            profile.audio_encoder,
+        ],
+        "webm" => vec![
+            "-c:v", profile.video_encoder, "-crf", "31", "-b:v", "0", "-row-mt", "1", "-c:a",
+            profile.audio_encoder, "-b:a", "160k",
+        ],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_profiles_have_the_promised_ffmpeg_encoders() {
+        let mp4 = video_profile_ffmpeg_args(super::super::video_profile("mp4").unwrap());
+        assert!(mp4.windows(2).any(|args| args == ["-c:v", "libx264"]));
+        assert!(mp4.windows(2).any(|args| args == ["-c:a", "aac"]));
+
+        let mkv = video_profile_ffmpeg_args(super::super::video_profile("mkv").unwrap());
+        assert!(mkv.windows(2).any(|args| args == ["-c:v", "libaom-av1"]));
+        assert!(mkv.windows(2).any(|args| args == ["-c:a", "flac"]));
+
+        let webm = video_profile_ffmpeg_args(super::super::video_profile("webm").unwrap());
+        assert!(webm.windows(2).any(|args| args == ["-c:v", "libvpx-vp9"]));
+        assert!(webm.windows(2).any(|args| args == ["-c:a", "libopus"]));
     }
 }

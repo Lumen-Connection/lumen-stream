@@ -203,11 +203,15 @@ fn card_defaults(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
         });
         ui.add_space(10.0);
 
-        *changed |= format_row(ui, s.settings_music_format, &["mp3", "m4a", "opus", "flac"], &mut app.config.music_format);
+        *changed |= format_row(ui, s.settings_music_format, &[("mp3", "mp3"), ("m4a", "m4a"), ("opus", "opus"), ("flac", "flac")], &mut app.config.music_format);
         ui.add_space(6.0);
-        *changed |= format_row(ui, s.settings_video_format, &["mp4", "mkv", "webm"], &mut app.config.video_format);
+        let video_formats: Vec<(&str, &str)> = crate::download::engine::video_profiles()
+            .iter()
+            .map(|profile| (profile.extension, profile.label))
+            .collect();
+        *changed |= format_row(ui, s.settings_video_format, &video_formats, &mut app.config.video_format);
         ui.add_space(6.0);
-        *changed |= format_row(ui, s.settings_quality, &["best", "medium", "high"], &mut app.config.quality);
+        *changed |= format_row(ui, s.settings_quality, &[("best", "best"), ("high", "high"), ("medium", "medium")], &mut app.config.quality);
         ui.add_space(10.0);
 
         ui.label(s.settings_max_history);
@@ -654,15 +658,15 @@ fn card_maintenance(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
     }
 }
 
-fn format_row(ui: &mut egui::Ui, label: &str, options: &[&str], value: &mut String) -> bool {
+fn format_row(ui: &mut egui::Ui, label: &str, options: &[(&str, &str)], value: &mut String) -> bool {
     let mut changed = false;
     ui.label(label);
     ui.horizontal(|ui| {
-        for opt in options {
-            let selected = value == *opt;
+        for (value_id, label) in options {
+            let selected = value == *value_id;
             let fill = if selected { theme::accent() } else { theme::bg_card() };
-            if ui.add(egui::Button::new(*opt).fill(fill)).clicked() && !selected {
-                *value = opt.to_string();
+            if ui.add(egui::Button::new(*label).fill(fill)).clicked() && !selected {
+                *value = (*value_id).to_string();
                 changed = true;
             }
         }
