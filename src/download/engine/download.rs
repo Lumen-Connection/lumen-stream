@@ -579,7 +579,18 @@ impl DownloadEngine {
             ("playlist", id)
         };
         let url = format!("https://open.spotify.com/embed/{}/{}", kind, raw_id);
-        let resp = reqwest::get(&url).await?;
+        // User-Agent de navegador: sem ele o embed às vezes devolve shell vazio
+        // ou HTML sem o JSON de faixas.
+        let resp = reqwest::Client::new()
+            .get(&url)
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .send()
+            .await?;
         if !resp.status().is_success() {
             return Err(format!(
                 "Spotify embed retornou HTTP {} para {}",
@@ -924,33 +935,8 @@ fn collect_spotify_track_pairs(v: &serde_json::Value) -> Vec<(String, String)> {
 fn walk_json_for_tracks(v: &serde_json::Value, out: &mut Vec<(String, String)>) {
     match v {
         serde_json::Value::Object(map) => {
-            // Formato típico do embed: { name, artists: [{name}], uri: "spotify:track:…" }.
-            if let Some(name) = map.get("name").and_then(|n| n.as_str()) {
-                let artists = map
-                    .get("artists")
-                    .and_then(|a| a.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                let uri = map.get("uri").and_then(|u| u.as_str()).unwrap_or("");
-                // Faixa se tem uri de track, ou tem artista(s) + não é playlist/album.
-                let is_track = uri.contains(":track:")
-                    || (!artists.is_empty()
-                        && !uri.contains(":playlist:")
-                        && !uri.contains(":album:")
-                        && map.get("artists").is_some());
-                if is_track && !name.is_empty() {
-                    let title = if artists.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!("{} - {}", artists, name)
-                    };
-                    out.push((format!("ytsearch1:{}", title), title));
-                }
+            if let Some(label) = spotify_track_label(map) {
+                out.push((format!("ytsearch1:{}", label), label));
             }
             for val in map.values() {
                 walk_json_for_tracks(val, out);
@@ -963,6 +949,65 @@ fn walk_json_for_tracks(v: &serde_json::Value, out: &mut Vec<(String, String)>) 
         }
         _ => {}
     }
+}
+
+/// Monta "Artista - Faixa" a partir de um objeto do embed.
+///
+/// Formato atual do embed (`__NEXT_DATA__`):
+/// `{ "uri":"spotify:track:…", "title":"Song", "subtitle":"Artist", "entityType":"track" }`
+///
+/// Formato legado / oEmbed-like:
+/// `{ "uri":"spotify:track:…", "name":"Song", "artists":[{"name":"Artist"}] }`
+fn spotify_track_label(map: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let uri = map.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+    let entity = map
+        .get("entityType")
+        .and_then(|e| e.as_str())
+        .unwrap_or("");
+    let is_track = uri.contains(":track:") || entity.eq_ignore_ascii_case("track");
+    if !is_track {
+        return None;
+    }
+
+    // Embed atual: title + subtitle (artista).
+    if let Some(title) = map.get("title").and_then(|t| t.as_str()) {
+        let title = title.trim();
+        if title.is_empty() {
+            return None;
+        }
+        let artist = map
+            .get("subtitle")
+            .and_then(|s| s.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        return Some(if artist.is_empty() {
+            title.to_string()
+        } else {
+            format!("{} - {}", artist, title)
+        });
+    }
+
+    // Legado: name + artists[].name
+    let name = map.get("name").and_then(|n| n.as_str())?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let artists = map
+        .get("artists")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    Some(if artists.is_empty() {
+        name.to_string()
+    } else {
+        format!("{} - {}", artists, name)
+    })
 }
 
 fn move_subtitle_sidecars(source: &Path, output: &Path) {
@@ -1071,7 +1116,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_spotify_embed_fixture_tracks() {
+    fn parse_spotify_embed_fixture_tracks_current_format() {
+        // Formato real do embed em 2026: title/subtitle/entityType (não name/artists).
+        let html = r#"
+        <html><body>
+        <script id="__NEXT_DATA__" type="application/json">
+        {"props":{"pageProps":{"state":{"data":{"entity":{"trackList":[
+          {"uri":"spotify:track:111","title":"Earrings","subtitle":"Malcolm Todd","entityType":"track"},
+          {"uri":"spotify:track:222","title":"Song B","subtitle":"Artist Two","entityType":"track"}
+        ]}}}}}}
+        </script>
+        </body></html>
+        "#;
+        let items = parse_spotify_embed_tracks(html);
+        assert_eq!(items.len(), 2, "{:?}", items);
+        assert_eq!(items[0].1, "Malcolm Todd - Earrings");
+        assert_eq!(items[0].0, "ytsearch1:Malcolm Todd - Earrings");
+        assert_eq!(items[1].1, "Artist Two - Song B");
+    }
+
+    #[test]
+    fn parse_spotify_embed_fixture_tracks_legacy_name_artists() {
         let html = r#"
         <html><body>
         <script id="__NEXT_DATA__" type="application/json">
@@ -1085,7 +1150,6 @@ mod tests {
         let items = parse_spotify_embed_tracks(html);
         assert_eq!(items.len(), 2, "{:?}", items);
         assert_eq!(items[0].1, "Artist One - Song A");
-        assert_eq!(items[0].0, "ytsearch1:Artist One - Song A");
         assert_eq!(items[1].1, "Artist Two, Feat - Song B");
     }
 }

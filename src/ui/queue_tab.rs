@@ -120,11 +120,22 @@ fn enqueue_input(app: &mut App) {
                     );
                 }
                 (Some(engine), None, Some(pid)) => {
+                    // Spotify → busca áudio no YouTube; força tipo Música e um
+                    // formato de áudio se o seletor estiver em vídeo.
+                    let sp_format = if matches!(media_type, MediaType::Music)
+                        && matches!(
+                            format.as_str(),
+                            "mp3" | "m4a" | "opus" | "flac" | "ogg" | "wav" | "aac"
+                        ) {
+                        format.clone()
+                    } else {
+                        app.config.music_format.clone()
+                    };
                     enqueue_playlist_fetch(
                         app,
                         engine,
-                        media_type,
-                        format.clone(),
+                        MediaType::Music,
+                        sp_format,
                         quality.clone(),
                         folder.clone(),
                         pt,
