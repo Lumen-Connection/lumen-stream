@@ -94,11 +94,12 @@ impl DownloadEngine {
             s.lines().next().map(|l| l.trim().to_string()).filter(|l| !l.is_empty())
         }
 
+        // Status em inglês neutro (UI traduz se quiser); evita PT fixo com app em EN.
         let missing_or_corrupt = |path: &Path| -> String {
             if path.exists() {
-                "⚠ corrompido".to_string()
+                "⚠ corrupt".to_string()
             } else {
-                "não instalado".to_string()
+                "not installed".to_string()
             }
         };
 
@@ -118,7 +119,11 @@ impl DownloadEngine {
         let pdfium = {
             use pdfium_render::prelude::Pdfium;
             let p = self.libs_dir.join(Pdfium::pdfium_platform_library_name());
-            if p.exists() { "instalado".to_string() } else { "não baixado".to_string() }
+            if p.exists() {
+                "installed".to_string()
+            } else {
+                "not downloaded".to_string()
+            }
         };
         rows.push(("pdfium".to_string(), pdfium));
 
@@ -127,9 +132,9 @@ impl DownloadEngine {
             let has_exe = find_whisper_exe(&dir).is_some();
             let has_model = dir.join("ggml-base.bin").exists();
             match (has_exe, has_model) {
-                (true, true) => "instalado (base)".to_string(),
-                (true, false) => "binário ok, sem modelo".to_string(),
-                _ => "não baixado".to_string(),
+                (true, true) => "installed (base)".to_string(),
+                (true, false) => "binary ok, no model".to_string(),
+                _ => "not downloaded".to_string(),
             }
         };
         rows.push(("whisper.cpp".to_string(), whisper));

@@ -1378,7 +1378,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
 
         DownloadPhase::Fetching => {
             let mut cancel = false;
-            egui::Window::new("Processando")
+            egui::Window::new(s.win_processing)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .resizable(false)
                 .fixed_size([400.0, 150.0])
@@ -1878,6 +1878,8 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 None
                             };
                             let captured_notify = app.config.notify_on_complete;
+                            let captured_notify_title = s.notify_dl_done.to_string();
+                            let captured_err_engine = s.err_engine.to_string();
                             let captured_cloud = if app.config.copy_to_cloud
                                 && !app.config.cloud_folder.trim().is_empty()
                             {
@@ -1915,9 +1917,9 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 let mut op = app.operation.lock().unwrap();
                                 op.phase = DownloadPhase::Downloading(
                                     if is_convert {
-                                        "Convertendo arquivo...".to_string()
+                                        s.dl_converting_file.to_string()
                                     } else {
-                                        "Iniciando download...".to_string()
+                                        s.dl_starting.to_string()
                                     },
                                 );
                                 op.file_name = new_file_name.clone();
@@ -2013,7 +2015,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                                 );
                                                 if captured_notify {
                                                     crate::notify::send(
-                                                        "Download concluído",
+                                                        captured_notify_title.as_str(),
                                                         &captured_title,
                                                     );
                                                 }
@@ -2032,7 +2034,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                     None => {
                                         let mut s = op_state.lock().unwrap();
                                         s.phase =
-                                            DownloadPhase::Failed("Engine não inicializado".to_string());
+                                            DownloadPhase::Failed(captured_err_engine);
                                     }
                                 }
                             }));
@@ -2066,7 +2068,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                 .as_ref()
                 .map(|e| e.net_stats())
                 .unwrap_or((0.0, Vec::new()));
-            egui::Window::new("Baixando")
+            egui::Window::new(s.win_downloading)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .resizable(false)
                 .fixed_size([400.0, 230.0])
@@ -2075,11 +2077,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                         let mut stop_save = false;
                         if is_live {
                             ui.label(
-                                egui::RichText::new(if pt {
-                                    "🔴 Gravando ao vivo"
-                                } else {
-                                    "🔴 Recording live"
-                                })
+                                egui::RichText::new(s.live_recording)
                                 .color(theme::danger())
                                 .size(16.0)
                                 .strong(),
@@ -2088,11 +2086,9 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                             let sub = if msg.contains("Finaliz") || msg.contains("Finali") {
                                 msg.clone()
                             } else if live_bytes == 0 {
-                                if pt { "Conectando à live...".to_string() } else { "Connecting to live...".to_string() }
-                            } else if pt {
-                                "Gravando — clique em Parar quando quiser".to_string()
+                                s.live_connecting.to_string()
                             } else {
-                                "Recording — click Stop whenever you want".to_string()
+                                s.live_hint.to_string()
                             };
                             ui.label(sub);
                             ui.add(
@@ -2130,11 +2126,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 if ui
                                     .add(
                                         egui::Button::new(
-                                            egui::RichText::new(if pt {
-                                                "⏹ Parar e salvar"
-                                            } else {
-                                                "⏹ Stop & save"
-                                            })
+                                            egui::RichText::new(s.live_stop_save)
                                             .color(Color32::WHITE),
                                         )
                                         .fill(theme::accent())
@@ -2147,11 +2139,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 if ui
                                     .add(
                                         egui::Button::new(
-                                            egui::RichText::new(if pt {
-                                                "Descartar"
-                                            } else {
-                                                "Discard"
-                                            })
+                                            egui::RichText::new(s.live_discard)
                                             .color(theme::text()),
                                         )
                                         .fill(theme::bg_card()),
@@ -2174,14 +2162,13 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                     Stage::Finalizing => s.dl_stage_finalizing.to_string(),
                                     Stage::Downloading => msg.clone(),
                                 }
-                            } else if live_bytes > 0 && msg.starts_with("Iniciando") {
-                                // "Iniciando download..." fica obsoleto assim que os
-                                // primeiros bytes chegam — troca por um rótulo honesto.
-                                if pt {
-                                    "Baixando...".to_string()
-                                } else {
-                                    "Downloading...".to_string()
-                                }
+                            } else if live_bytes > 0
+                                && (msg == s.dl_starting
+                                    || msg.starts_with("Iniciando")
+                                    || msg.starts_with("Starting"))
+                            {
+                                // Rótulo de "iniciando" fica obsoleto com os primeiros bytes.
+                                s.dl_downloading.to_string()
                             } else {
                                 msg.clone()
                             };
@@ -2242,7 +2229,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                         egui::RichText::new(format!(
                                             "💾 {} {}",
                                             crate::download::engine::format_size(live_bytes as i64),
-                                            if pt { "baixados" } else { "downloaded" }
+                                            s.dl_bytes_label
                                         ))
                                         .color(theme::text_muted())
                                         .size(12.0),
@@ -2275,7 +2262,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
         }
 
         DownloadPhase::Completed(path) => {
-            egui::Window::new("Download Concluído")
+            egui::Window::new(s.win_dl_done)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .resizable(false)
                 .fixed_size([400.0, 140.0])
@@ -2315,7 +2302,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
         }
 
         DownloadPhase::Failed(msg) => {
-            egui::Window::new("Erro")
+            egui::Window::new(s.win_error)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .resizable(false)
                 .fixed_size([400.0, 130.0])

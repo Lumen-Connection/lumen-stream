@@ -220,6 +220,7 @@ impl Queue {
         db_path: PathBuf,
         subtitle_langs: Option<String>,
         notify: bool,
+        notify_title: String,
         rate_limit: Option<String>,
         concurrent_fragments: u32,
         organize_by: String,
@@ -277,6 +278,7 @@ impl Queue {
             let rate_limit = rate_limit.clone();
             let organize_by = organize_by.clone();
             let cloud_folder = cloud_folder.clone();
+            let notify_title = notify_title.clone();
 
             let handle = tokio::spawn(async move {
                 // Spotify faixa única e outros resolvem para ytsearch1:… aqui,
@@ -361,7 +363,7 @@ impl Queue {
                         );
                         set_status(&jobs, id, JobStatus::Completed(p.to_string_lossy().to_string()));
                         if notify {
-                            crate::notify::send("Download concluído", &title);
+                            crate::notify::send(&notify_title, &title);
                         }
                     }
                     Err(e) => {
