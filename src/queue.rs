@@ -33,6 +33,7 @@ pub struct QueueJob {
     pub retries: u32,
     pub speed: f32,
     pub eta: u64,
+    pub stage: crate::download::engine::Stage,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -278,13 +279,17 @@ impl Queue {
             let cloud_folder = cloud_folder.clone();
 
             let handle = tokio::spawn(async move {
+                // Spotify faixa única e outros resolvem para ytsearch1:… aqui,
+                // antes do fetch_info / download (mesmo padrão do download avulso).
+                let url = engine.resolve_source(&url).await;
                 let title = match engine.fetch_info(&url).await {
                     Ok(t) => t,
                     Err(e) => {
+                        let msg = crate::download::engine::friendly_error(&e.to_string());
                         set_status(
                             &jobs,
                             id,
-                            JobStatus::Failed(format!("Falha ao obter info: {}", e)),
+                            JobStatus::Failed(format!("Falha ao obter info: {}", msg)),
                         );
                         return;
                     }
@@ -306,7 +311,14 @@ impl Queue {
 
                 let jobs_cb = jobs.clone();
                 let on_progress = move |pr: crate::download::engine::Progress| {
-                    set_progress(&jobs_cb, id, pr.fraction as f32, pr.speed_bps as f32, pr.eta_secs);
+                    set_progress(
+                        &jobs_cb,
+                        id,
+                        pr.fraction as f32,
+                        pr.speed_bps as f32,
+                        pr.eta_secs,
+                        pr.stage,
+                    );
                 };
 
                 let subs = if is_music { None } else { subtitle_langs };
@@ -397,6 +409,7 @@ pub fn push_job(
         retries: 0,
         speed: 0.0,
         eta: 0,
+        stage: crate::download::engine::Stage::Downloading,
     });
 }
 
@@ -423,11 +436,19 @@ fn set_title(jobs: &Jobs, id: u64, title: String) {
         job.title = title;
     }
 }
-fn set_progress(jobs: &Jobs, id: u64, p: f32, speed: f32, eta: u64) {
+fn set_progress(
+    jobs: &Jobs,
+    id: u64,
+    p: f32,
+    speed: f32,
+    eta: u64,
+    stage: crate::download::engine::Stage,
+) {
     if let Some(job) = jobs.lock().unwrap().iter_mut().find(|j| j.id == id) {
         job.progress = Some(p.clamp(0.0, 1.0));
         job.speed = speed;
         job.eta = eta;
+        job.stage = stage;
     }
 }
 
@@ -437,14 +458,74 @@ pub fn playlist_id_from_url(url: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Extrai o id de playlist/álbum do Spotify nas formas:
+/// `open.spotify.com/playlist/<id>`, `/album/<id>`, `spotify:playlist:<id>`.
+pub fn spotify_playlist_id(url: &str) -> Option<String> {
+    let u = url.trim();
+    if let Some(rest) = u.strip_prefix("spotify:playlist:") {
+        let id = rest.split(&['?', '#'][..]).next().unwrap_or(rest).trim();
+        return (!id.is_empty()).then(|| id.to_string());
+    }
+    if let Some(rest) = u.strip_prefix("spotify:album:") {
+        let id = rest.split(&['?', '#'][..]).next().unwrap_or(rest).trim();
+        return (!id.is_empty()).then(|| format!("album:{}", id));
+    }
+    let lower = u.to_ascii_lowercase();
+    for (marker, prefix) in [
+        ("open.spotify.com/playlist/", ""),
+        ("open.spotify.com/album/", "album:"),
+    ] {
+        if let Some(idx) = lower.find(marker) {
+            let after = &u[idx + marker.len()..];
+            let id = after
+                .split(&['?', '#', '/'][..])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !id.is_empty() {
+                return Some(format!("{}{}", prefix, id));
+            }
+        }
+    }
+    None
+}
+
 pub fn is_playlist(url: &str) -> bool {
-    playlist_id_from_url(url).is_some()
+    playlist_id_from_url(url).is_some() || spotify_playlist_id(url).is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::MediaType;
+
+    #[test]
+    fn spotify_playlist_id_three_forms() {
+        assert_eq!(
+            spotify_playlist_id("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc"),
+            Some("37i9dQZF1DXcBWIGoYBM5M".into())
+        );
+        assert_eq!(
+            spotify_playlist_id("https://open.spotify.com/album/1ABC?si=x"),
+            Some("album:1ABC".into())
+        );
+        assert_eq!(
+            spotify_playlist_id("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"),
+            Some("37i9dQZF1DXcBWIGoYBM5M".into())
+        );
+        assert_eq!(spotify_playlist_id("https://youtube.com/watch?v=x"), None);
+    }
+
+    #[test]
+    fn is_playlist_covers_youtube_and_spotify() {
+        assert!(is_playlist(
+            "https://www.youtube.com/watch?v=x&list=PLtest"
+        ));
+        assert!(is_playlist(
+            "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
+        ));
+        assert!(!is_playlist("https://open.spotify.com/track/abc"));
+    }
 
     fn add(q: &Queue, url: &str) {
         q.add(
@@ -602,7 +683,14 @@ mod tests {
     fn progress_is_clamped() {
         let q = Queue::new();
         add(&q, "a");
-        set_progress(&q.jobs, 1, 1.5, 10.0, 3);
+        set_progress(
+            &q.jobs,
+            1,
+            1.5,
+            10.0,
+            3,
+            crate::download::engine::Stage::Downloading,
+        );
         let jobs = q.jobs.lock().unwrap();
         assert_eq!(jobs[0].progress, Some(1.0));
         assert_eq!(jobs[0].speed, 10.0);

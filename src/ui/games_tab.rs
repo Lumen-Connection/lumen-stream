@@ -316,6 +316,7 @@ fn sync_gtav_flow(app: &mut App, files: Vec<std::path::PathBuf>) {
                     "mp3",
                     "",
                     convert_engine,
+                    |_| {},
                 )
                 .await
                 .ok()

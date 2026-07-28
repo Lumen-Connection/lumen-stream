@@ -6,11 +6,11 @@ use yt_dlp::client::deps::Libraries;
 use super::fs_utils::{
     binary_path, cleanup_partials, concat_frag_groups, find_output, frag_bytes, part_bytes,
 };
-use super::models::{format_duration, DownloadOptions, FormatRow, Progress, VideoPreview};
+use super::models::{format_duration, DownloadOptions, FormatRow, Progress, Stage, VideoPreview};
 use super::net::download_thumbnail;
 use super::ytdlp_util::{
     friendly_error, looks_like_url, parse_ytdlp_eta, parse_ytdlp_percent,
-    parse_ytdlp_size, parse_ytdlp_speed, ytdlp_error,
+    parse_ytdlp_size, parse_ytdlp_speed, stage_from_ytdlp_line, ytdlp_error,
 };
 use super::{kill_tree, wait_for_stop, DownloadEngine};
 
@@ -78,12 +78,19 @@ impl DownloadEngine {
         let mut out = PathBuf::from(output_path);
         out.set_extension(&opts.format);
         if opts.is_audio {
-            return self.ytdlp_download(url, &out, &opts, on_progress).await;
+            return self.ytdlp_download(url, &out, &opts, &on_progress).await;
         }
 
         let source = video_source_path(&out);
-        let source = self.ytdlp_download(url, &source, &opts, on_progress).await?;
+        let source = self.ytdlp_download(url, &source, &opts, &on_progress).await?;
 
+        // Re-encode completo (libx264/av1/vp9): em máquina fraca leva minutos.
+        // Emite estágio antes de começar para a UI não ficar em "100% + 0 B/s".
+        on_progress(Progress {
+            fraction: 1.0,
+            stage: Stage::Transcoding,
+            ..Default::default()
+        });
         let transcode = self.transcode_video_profile(&source, &out, &opts.format).await;
         match transcode {
             Ok(()) => {
@@ -187,10 +194,10 @@ impl DownloadEngine {
         url: &str,
         out: &Path,
         opts: &DownloadOptions,
-        on_progress: F,
+        on_progress: &F,
     ) -> Result<PathBuf, Box<dyn std::error::Error>>
     where
-        F: Fn(Progress) + Send + Sync + 'static,
+        F: Fn(Progress) + Send + Sync,
     {
         use std::process::Stdio;
         use tokio::io::AsyncBufReadExt;
@@ -364,6 +371,7 @@ impl DownloadEngine {
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             let (mut last_frac, mut last_speed, mut last_eta, mut last_bytes) =
                 (0.0f64, 0.0f64, 0u64, 0u64);
+            let mut last_stage = Stage::Downloading;
             let stop = opts.stop.clone();
             let mut stopped = false;
             let mut stalled = false;
@@ -378,6 +386,12 @@ impl DownloadEngine {
                     line = lines.next_line() => {
                         let Ok(Some(line)) = line else { break };
                         let mut changed = false;
+                        if let Some(st) = stage_from_ytdlp_line(&line) {
+                            if st != last_stage {
+                                last_stage = st;
+                                changed = true;
+                            }
+                        }
                         if let Some(p) = parse_ytdlp_percent(&line) {
                             last_frac = p;
                             changed = true;
@@ -401,11 +415,20 @@ impl DownloadEngine {
                             changed = true;
                         }
                         if changed {
+                            // Em pós-processamento não há transferência: zera
+                            // velocidade para a UI não mostrar "0 B/s" mentiroso
+                            // junto com a barra de 100%.
+                            let (speed, bytes) = if last_stage == Stage::Downloading {
+                                (last_speed, last_bytes)
+                            } else {
+                                (0.0, last_bytes)
+                            };
                             on_progress(Progress {
                                 fraction: last_frac,
-                                speed_bps: last_speed,
+                                speed_bps: speed,
                                 eta_secs: last_eta,
-                                downloaded_bytes: last_bytes,
+                                downloaded_bytes: bytes,
+                                stage: last_stage,
                             });
                         }
                     }
@@ -415,7 +438,9 @@ impl DownloadEngine {
                         // normais) nem para o pós-processamento (com o download
                         // completo, os bytes param de crescer enquanto o ffmpeg
                         // faz merge/extração).
-                        if opts.is_live || last_frac >= 0.99 || bytes >= stall_mark + STALL_MIN_GROWTH {
+                        if opts.is_live || last_frac >= 0.99 || last_stage != Stage::Downloading
+                            || bytes >= stall_mark + STALL_MIN_GROWTH
+                        {
                             stall_mark = stall_mark.max(bytes);
                             stall_at = std::time::Instant::now();
                         } else if stall_at.elapsed() >= STALL_WINDOW {
@@ -427,7 +452,7 @@ impl DownloadEngine {
                             let _ = child.start_kill();
                             break;
                         }
-                        if bytes != last_bytes {
+                        if bytes != last_bytes && last_stage == Stage::Downloading {
                             let delta = bytes.saturating_sub(last_bytes) as f64 / 0.5;
                             last_bytes = bytes;
                             last_speed = delta;
@@ -444,6 +469,7 @@ impl DownloadEngine {
                                 speed_bps: last_speed,
                                 eta_secs: last_eta,
                                 downloaded_bytes: last_bytes,
+                                stage: last_stage,
                             });
                         }
                     }
@@ -469,7 +495,11 @@ impl DownloadEngine {
             if stopped {
                 let _ = child.wait().await;
                 if let Some(p) = self.finalize_live_partials(&folder, &stem, &final_ext).await {
-                    on_progress(Progress { fraction: 1.0, ..Default::default() });
+                    on_progress(Progress {
+                        fraction: 1.0,
+                        stage: Stage::Finalizing,
+                        ..Default::default()
+                    });
                     return Ok(p);
                 }
                 return Err("Nada foi gravado antes de parar.".into());
@@ -479,7 +509,12 @@ impl DownloadEngine {
             let stderr_text = stderr_task.await.unwrap_or_default();
 
             if status.success() {
-                on_progress(Progress { fraction: 1.0, ..Default::default() });
+                on_progress(Progress {
+                    fraction: 1.0,
+                    stage: last_stage,
+                    downloaded_bytes: last_bytes,
+                    ..Default::default()
+                });
                 let expected = folder.join(format!("{}.{}", stem, final_ext));
                 let result = if expected.exists() {
                     Some(expected)
@@ -508,7 +543,11 @@ impl DownloadEngine {
             if opts.is_live && part_bytes(&folder, &stem) > 0 {
                 if let Some(p) = self.finalize_live_partials(&folder, &stem, &final_ext).await {
                     crate::applog::info("live caiu; gravação parcial finalizada");
-                    on_progress(Progress { fraction: 1.0, ..Default::default() });
+                    on_progress(Progress {
+                        fraction: 1.0,
+                        stage: Stage::Finalizing,
+                        ..Default::default()
+                    });
                     return Ok(p);
                 }
             }
@@ -526,6 +565,38 @@ impl DownloadEngine {
                 .into());
         }
         Err(friendly_error(&last_err).into())
+    }
+
+    /// Metadados de playlist/álbum do Spotify via embed público (sem credenciais).
+    /// Devolve pares `(ytsearch1:Artista - Faixa, "Artista - Faixa")`.
+    pub async fn fetch_spotify_playlist(
+        &self,
+        id: &str,
+    ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+        let (kind, raw_id) = if let Some(album) = id.strip_prefix("album:") {
+            ("album", album)
+        } else {
+            ("playlist", id)
+        };
+        let url = format!("https://open.spotify.com/embed/{}/{}", kind, raw_id);
+        let resp = reqwest::get(&url).await?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "Spotify embed retornou HTTP {} para {}",
+                resp.status(),
+                url
+            )
+            .into());
+        }
+        let html = resp.text().await?;
+        let items = parse_spotify_embed_tracks(&html);
+        if items.is_empty() {
+            return Err(
+                "Nenhuma faixa encontrada no embed do Spotify (playlist vazia ou página mudou)."
+                    .into(),
+            );
+        }
+        Ok(items)
     }
 
     pub async fn fetch_playlist(
@@ -802,6 +873,98 @@ fn video_source_path(output: &Path) -> PathBuf {
     parent.join(format!("{}.lumen-source.mkv", stem))
 }
 
+/// Extrai faixas do HTML do embed Spotify (`__NEXT_DATA__` ou JSON embutido).
+/// Retorna pares `(ytsearch1:Artista - Faixa, "Artista - Faixa")`.
+pub(super) fn parse_spotify_embed_tracks(html: &str) -> Vec<(String, String)> {
+    // Preferência: script id="__NEXT_DATA__"; senão qualquer application/json.
+    for json_str in extract_json_scripts(html) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
+            let items = collect_spotify_track_pairs(&v);
+            if !items.is_empty() {
+                return items;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn extract_json_scripts(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(idx) = rest.find("<script") {
+        let after = &rest[idx..];
+        let Some(gt) = after.find('>') else { break };
+        let tag = &after[..gt + 1];
+        let body_start = gt + 1;
+        let Some(end) = after[body_start..].find("</script>") else { break };
+        let body = after[body_start..body_start + end].trim();
+        let prefer = tag.contains("__NEXT_DATA__") || tag.contains("application/json");
+        if prefer && body.starts_with('{') {
+            if tag.contains("__NEXT_DATA__") {
+                out.insert(0, body.to_string());
+            } else {
+                out.push(body.to_string());
+            }
+        }
+        rest = &after[body_start + end + 9..];
+    }
+    out
+}
+
+fn collect_spotify_track_pairs(v: &serde_json::Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    walk_json_for_tracks(v, &mut out);
+    // Dedup preservando ordem.
+    let mut seen = std::collections::HashSet::new();
+    out.into_iter()
+        .filter(|(_, title)| seen.insert(title.clone()))
+        .collect()
+}
+
+fn walk_json_for_tracks(v: &serde_json::Value, out: &mut Vec<(String, String)>) {
+    match v {
+        serde_json::Value::Object(map) => {
+            // Formato típico do embed: { name, artists: [{name}], uri: "spotify:track:…" }.
+            if let Some(name) = map.get("name").and_then(|n| n.as_str()) {
+                let artists = map
+                    .get("artists")
+                    .and_then(|a| a.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let uri = map.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+                // Faixa se tem uri de track, ou tem artista(s) + não é playlist/album.
+                let is_track = uri.contains(":track:")
+                    || (!artists.is_empty()
+                        && !uri.contains(":playlist:")
+                        && !uri.contains(":album:")
+                        && map.get("artists").is_some());
+                if is_track && !name.is_empty() {
+                    let title = if artists.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{} - {}", artists, name)
+                    };
+                    out.push((format!("ytsearch1:{}", title), title));
+                }
+            }
+            for val in map.values() {
+                walk_json_for_tracks(val, out);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                walk_json_for_tracks(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn move_subtitle_sidecars(source: &Path, output: &Path) {
     let Some(folder) = source.parent() else {
         return;
@@ -905,5 +1068,24 @@ mod tests {
     fn video_source_uses_a_temporary_mkv_next_to_final_output() {
         let source = video_source_path(Path::new("D:/downloads/clip.mp4"));
         assert_eq!(source, PathBuf::from("D:/downloads/clip.lumen-source.mkv"));
+    }
+
+    #[test]
+    fn parse_spotify_embed_fixture_tracks() {
+        let html = r#"
+        <html><body>
+        <script id="__NEXT_DATA__" type="application/json">
+        {"props":{"pageProps":{"state":{"data":{"entity":{"trackList":[
+          {"name":"Song A","uri":"spotify:track:111","artists":[{"name":"Artist One"}]},
+          {"name":"Song B","uri":"spotify:track:222","artists":[{"name":"Artist Two"},{"name":"Feat"}]}
+        ]}}}}}}
+        </script>
+        </body></html>
+        "#;
+        let items = parse_spotify_embed_tracks(html);
+        assert_eq!(items.len(), 2, "{:?}", items);
+        assert_eq!(items[0].1, "Artist One - Song A");
+        assert_eq!(items[0].0, "ytsearch1:Artist One - Song A");
+        assert_eq!(items[1].1, "Artist Two, Feat - Song B");
     }
 }

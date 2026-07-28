@@ -41,6 +41,9 @@ pub struct App {
     clip_last_check: std::time::Instant,
     pub batch_convert: Vec<std::path::PathBuf>,
     pub batch_convert_format: String,
+    /// Seleção da card "Imagens em lote" (revisão antes de converter).
+    pub image_batch_files: Vec<std::path::PathBuf>,
+    pub image_batch_out_dir: Option<std::path::PathBuf>,
     pub toasts: Vec<Toast>,
     last_signaled: Option<String>,
     pub toast_queue: Arc<Mutex<Vec<(String, bool)>>>,
@@ -224,6 +227,8 @@ pub struct DownloadOperation {
     pub live_from_start: bool,
     pub is_live: bool,
     pub live_bytes: u64,
+    /// Estágio honesto (download / pós-processamento / transcode).
+    pub stage: crate::download::engine::Stage,
 }
 
 #[derive(Clone, PartialEq)]
@@ -291,6 +296,7 @@ impl App {
             live_from_start: false,
             is_live: false,
             live_bytes: 0,
+            stage: crate::download::engine::Stage::Downloading,
         }));
 
         let batch_format = config.video_format.clone();
@@ -324,6 +330,8 @@ impl App {
             clip_last_check: std::time::Instant::now(),
             batch_convert: Vec::new(),
             batch_convert_format: String::new(),
+            image_batch_files: Vec::new(),
+            image_batch_out_dir: None,
             toasts: Vec::new(),
             last_signaled: None,
             toast_queue: Arc::new(Mutex::new(Vec::new())),

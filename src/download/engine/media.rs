@@ -1,9 +1,128 @@
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
-use super::models::AudioMeta;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+use super::models::{AudioMeta, Progress};
 use super::DownloadEngine;
 
+/// Extrai `Duration: HH:MM:SS.xx` do stderr do ffmpeg.
+pub(super) fn parse_ffmpeg_duration(text: &str) -> Option<f64> {
+    for line in text.lines() {
+        let t = line.trim();
+        let rest = t.strip_prefix("Duration:")?.trim();
+        let token = rest.split(',').next()?.trim();
+        let mut parts = token.split(':');
+        let h: f64 = parts.next()?.parse().ok()?;
+        let m: f64 = parts.next()?.parse().ok()?;
+        let s: f64 = parts.next()?.parse().ok()?;
+        return Some(h * 3600.0 + m * 60.0 + s);
+    }
+    None
+}
+
+/// Converte `out_time_us=N` (microsegundos) em segundos.
+pub(super) fn parse_out_time_us(line: &str) -> Option<f64> {
+    let v = line.trim().strip_prefix("out_time_us=")?;
+    let us: f64 = v.parse().ok()?;
+    Some(us / 1_000_000.0)
+}
+
+/// Fração de progresso, limitada a 1.0.
+pub(super) fn progress_fraction(out_time_secs: f64, total_secs: f64) -> f64 {
+    if total_secs <= 0.0 {
+        return 0.0;
+    }
+    (out_time_secs / total_secs).clamp(0.0, 1.0)
+}
+
 impl DownloadEngine {
+    /// Duração do arquivo via `ffmpeg -i` (stderr).
+    async fn probe_duration_secs(&self, input: &Path) -> Option<f64> {
+        let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
+        cmd.arg("-hide_banner").arg("-i").arg(input);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        let output = cmd.output().await.ok()?;
+        parse_ffmpeg_duration(&String::from_utf8_lossy(&output.stderr))
+    }
+
+    /// Roda o ffmpeg lendo `-progress pipe:1` e reportando fração real.
+    /// Registra o PID em `dl_pids` para cancelamento matar a árvore.
+    async fn run_ffmpeg_progress<F>(
+        &self,
+        mut cmd: tokio::process::Command,
+        total_secs: Option<f64>,
+        on_progress: Option<&F>,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: Fn(Progress) + Send + Sync,
+    {
+        // -progress pipe:1 emite key=value no stdout; -nostats evita lixo no stderr.
+        cmd.arg("-progress").arg("pipe:1").arg("-nostats");
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+
+        let mut child = cmd.spawn()?;
+        let pid = child.id();
+        if let Some(pid) = pid {
+            self.dl_pids.lock().unwrap().push(pid);
+        }
+
+        let stdout = child.stdout.take();
+        let mut stderr_buf = Vec::new();
+        let stderr_task = {
+            let mut stderr = child.stderr.take();
+            tokio::spawn(async move {
+                if let Some(ref mut s) = stderr {
+                    let _ = s.read_to_end(&mut stderr_buf).await;
+                }
+                stderr_buf
+            })
+        };
+
+        if let Some(stdout) = stdout {
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.trim() == "progress=end" {
+                    if let Some(cb) = on_progress {
+                        cb(Progress {
+                            fraction: 1.0,
+                            ..Default::default()
+                        });
+                    }
+                    break;
+                }
+                if let (Some(total), Some(secs)) = (total_secs, parse_out_time_us(&line)) {
+                    if let Some(cb) = on_progress {
+                        cb(Progress {
+                            fraction: progress_fraction(secs, total),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+
+        let status = child.wait().await?;
+        if let Some(pid) = pid {
+            self.dl_pids.lock().unwrap().retain(|running| *running != pid);
+        }
+        let stderr = stderr_task.await.unwrap_or_default();
+        if !status.success() {
+            let text = String::from_utf8_lossy(&stderr);
+            let last = text
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("");
+            return Err(format!("ffmpeg falhou: {}", last).into());
+        }
+        Ok(())
+    }
+
     /// Re-encodes a downloaded video source into one of Lumen Stream's named
     /// video profiles. This is deliberately separate from yt-dlp's merge step:
     /// a container extension alone does not guarantee the stream codecs.
@@ -18,6 +137,7 @@ impl DownloadEngine {
         let temp_output = profile_temp_output(output);
         let _ = std::fs::remove_file(&temp_output);
 
+        let total = self.probe_duration_secs(input).await;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-y")
             .arg("-i")
@@ -30,30 +150,21 @@ impl DownloadEngine {
             .arg("0")
             .args(video_profile_ffmpeg_args(profile))
             .arg(&temp_output);
-        cmd.kill_on_drop(true);
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
 
-        let child = cmd.spawn()?;
-        let pid = child.id();
-        if let Some(pid) = pid {
-            self.dl_pids.lock().unwrap().push(pid);
-        }
-        let result = child.wait_with_output().await;
-        if let Some(pid) = pid {
-            self.dl_pids.lock().unwrap().retain(|running| *running != pid);
-        }
-        let result = result?;
+        // Sem callback de UI aqui: o estágio Transcoding da task 01 já cobre
+        // o feedback honesto; o progresso percentual é da conversão avulsa.
+        let nop = |_: Progress| {};
+        self.run_ffmpeg_progress(cmd, total, Some(&nop)).await.map_err(|e| {
+            let _ = std::fs::remove_file(&temp_output);
+            e
+        })?;
 
-        if !result.status.success()
-            || std::fs::metadata(&temp_output)
-                .map(|metadata| metadata.len() == 0)
-                .unwrap_or(true)
+        if std::fs::metadata(&temp_output)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true)
         {
             let _ = std::fs::remove_file(&temp_output);
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            let last = stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("");
-            return Err(format!("ffmpeg falhou ao gerar {}: {}", profile.label, last).into());
+            return Err(format!("ffmpeg falhou ao gerar {}: saída vazia", profile.label).into());
         }
 
         // Never expose a partial final file. Replace an existing target only
@@ -158,6 +269,8 @@ impl DownloadEngine {
         cmd.creation_flags(0x08000000);
         let output = cmd.output().await?;
         let text = String::from_utf8_lossy(&output.stderr);
+        // Reusa o parser de duração (testável) — só filtra as linhas úteis.
+        let _ = parse_ffmpeg_duration(&text);
         let mut lines: Vec<String> = Vec::new();
         for l in text.lines() {
             let t = l.trim();
@@ -180,13 +293,18 @@ impl DownloadEngine {
         Ok(lines.join("\n"))
     }
 
-    pub(super) async fn transcode_audio(
+    pub(super) async fn transcode_audio<F>(
         &self,
         input: &Path,
         output: &Path,
         format: &str,
         meta: &AudioMeta,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        on_progress: Option<&F>,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: Fn(Progress) + Send + Sync,
+    {
+        let total = self.probe_duration_secs(input).await;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-y")
             .arg("-i")
@@ -228,16 +346,9 @@ impl DownloadEngine {
         }
         cmd.arg(output);
 
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
-
-        let result = cmd.output().await?;
-        if !result.status.success() {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
-            return Err(format!("ffmpeg falhou ao converter para {}: {}", format, last).into());
-        }
-        Ok(())
+        self.run_ffmpeg_progress(cmd, total, on_progress)
+            .await
+            .map_err(|e| format!("ffmpeg falhou ao converter para {}: {}", format, e).into())
     }
 
     pub async fn extract_frames(
@@ -277,22 +388,35 @@ impl DownloadEngine {
         Ok(out_dir)
     }
 
-    pub async fn batch_convert_images(
+    /// Converte imagens em lote. `on_progress(done, total)` a cada item.
+    /// Retorna `(pasta, nomes que falharam)`.
+    pub async fn batch_convert_images<F>(
         &self,
         inputs: Vec<PathBuf>,
         out_dir: PathBuf,
         format: String,
         max_width: u32,
         quality: u32,
-    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        on_progress: F,
+    ) -> Result<(PathBuf, Vec<String>), Box<dyn std::error::Error>>
+    where
+        F: Fn(usize, usize) + Send + Sync,
+    {
         std::fs::create_dir_all(&out_dir)?;
+        let total = inputs.len();
         let mut ok = 0usize;
+        let mut failed: Vec<String> = Vec::new();
         let mut last_err = String::new();
-        for inp in &inputs {
+        for (i, inp) in inputs.iter().enumerate() {
+            on_progress(i, total);
             let stem = inp
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "imagem".to_string());
+            let name = inp
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| stem.clone());
             let out = out_dir.join(format!("{}.{}", stem, format));
 
             let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
@@ -300,18 +424,8 @@ impl DownloadEngine {
             if max_width > 0 {
                 cmd.arg("-vf").arg(format!("scale='min({},iw)':-2", max_width));
             }
-            match format.as_str() {
-                "jpg" | "jpeg" => {
-                    let qv = 2 + ((100u32.saturating_sub(quality.min(100))) * 29 / 100);
-                    cmd.arg("-q:v").arg(qv.to_string());
-                }
-                "webp" => {
-                    cmd.arg("-quality").arg(quality.min(100).to_string());
-                }
-                "png" => {
-                    cmd.arg("-compression_level").arg("9");
-                }
-                _ => {}
+            for (k, v) in image_format_ffmpeg_args(&format, quality) {
+                cmd.arg(k).arg(v);
             }
             cmd.arg(&out);
             #[cfg(windows)]
@@ -321,6 +435,7 @@ impl DownloadEngine {
             if res.status.success() && out.exists() {
                 ok += 1;
             } else {
+                failed.push(name);
                 let stderr = String::from_utf8_lossy(&res.stderr);
                 last_err = stderr
                     .lines()
@@ -330,10 +445,11 @@ impl DownloadEngine {
                     .to_string();
             }
         }
+        on_progress(total, total);
         if ok == 0 {
             return Err(format!("nenhuma imagem convertida: {}", last_err).into());
         }
-        Ok(out_dir)
+        Ok((out_dir, failed))
     }
 
     pub async fn verify_integrity(&self, file: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -390,6 +506,7 @@ impl DownloadEngine {
             pos = overlay_pos
         );
 
+        let total = self.probe_duration_secs(Path::new(input)).await;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-y")
             .arg("-i")
@@ -401,15 +518,11 @@ impl DownloadEngine {
             .arg("-c:a")
             .arg("copy")
             .arg(&out);
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
 
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
-            return Err(format!("ffmpeg falhou ao aplicar marca d'água: {}", last).into());
-        }
+        let nop = |_: Progress| {};
+        self.run_ffmpeg_progress(cmd, total, Some(&nop))
+            .await
+            .map_err(|e| format!("ffmpeg falhou ao aplicar marca d'água: {}", e))?;
         Ok(out)
     }
 
@@ -470,12 +583,17 @@ impl DownloadEngine {
         Ok(out)
     }
 
-    pub(super) async fn transcode_media(
+    pub(super) async fn transcode_media<F>(
         &self,
         input: &Path,
         output: &Path,
         preset: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        on_progress: Option<&F>,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: Fn(Progress) + Send + Sync,
+    {
+        let total = self.probe_duration_secs(input).await;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
 
         let is_gif = output
@@ -489,15 +607,10 @@ impl DownloadEngine {
                 .arg("-vf")
                 .arg("fps=12,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse")
                 .arg(output);
-            #[cfg(windows)]
-            cmd.creation_flags(0x08000000);
-            let result = cmd.output().await?;
-            if !result.status.success() {
-                let stderr = String::from_utf8_lossy(&result.stderr);
-                let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
-                return Err(format!("ffmpeg falhou ao gerar GIF: {}", last).into());
-            }
-            return Ok(());
+            return self
+                .run_ffmpeg_progress(cmd, total, on_progress)
+                .await
+                .map_err(|e| format!("ffmpeg falhou ao gerar GIF: {}", e).into());
         }
 
         cmd.arg("-y").arg("-i").arg(input).arg("-map_metadata").arg("0");
@@ -543,16 +656,47 @@ impl DownloadEngine {
         }
         cmd.arg(output);
 
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
+        self.run_ffmpeg_progress(cmd, total, on_progress)
+            .await
+            .map_err(|e| format!("ffmpeg falhou ao converter: {}", e).into())
+    }
+}
 
-        let result = cmd.output().await?;
-        if !result.status.success() {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
-            return Err(format!("ffmpeg falhou ao converter: {}", last).into());
+/// Args de qualidade do ffmpeg por formato de imagem.
+/// PNG é sem perdas — não recebe parâmetro de qualidade.
+pub fn image_format_ffmpeg_args(format: &str, quality: u32) -> Vec<(String, String)> {
+    match format {
+        "jpg" | "jpeg" => {
+            let qv = 2 + ((100u32.saturating_sub(quality.min(100))) * 29 / 100);
+            vec![("-q:v".into(), qv.to_string())]
         }
-        Ok(())
+        "webp" => vec![("-quality".into(), quality.min(100).to_string())],
+        "png" => vec![("-compression_level".into(), "9".into())],
+        _ => Vec::new(),
+    }
+}
+
+/// Resumo de falhas de lote de imagens (texto honesto para a UI).
+pub fn image_batch_summary(ok: usize, failed: usize, pt: bool) -> String {
+    if failed == 0 {
+        if pt {
+            format!("{} de {} convertidas", ok, ok)
+        } else {
+            format!("{} of {} converted", ok, ok)
+        }
+    } else if ok == 0 {
+        if pt {
+            format!("Nenhuma convertida — {} falharam", failed)
+        } else {
+            format!("None converted — {} failed", failed)
+        }
+    } else {
+        let total = ok + failed;
+        if pt {
+            format!("{} de {} convertidas — {} falharam", ok, total, failed)
+        } else {
+            format!("{} of {} converted — {} failed", ok, total, failed)
+        }
     }
 }
 
@@ -601,5 +745,57 @@ mod tests {
         let webm = video_profile_ffmpeg_args(super::super::video_profile("webm").unwrap());
         assert!(webm.windows(2).any(|args| args == ["-c:v", "libvpx-vp9"]));
         assert!(webm.windows(2).any(|args| args == ["-c:a", "libopus"]));
+    }
+
+    #[test]
+    fn parse_ffmpeg_duration_hh_mm_ss() {
+        assert_eq!(
+            parse_ffmpeg_duration("  Duration: 00:01:23.45, start: 0.0, bitrate: 1000 kb/s"),
+            Some(83.45)
+        );
+        assert_eq!(
+            parse_ffmpeg_duration("Duration: 01:00:00.00, start: 0.000000"),
+            Some(3600.0)
+        );
+    }
+
+    #[test]
+    fn parse_ffmpeg_duration_missing() {
+        assert_eq!(parse_ffmpeg_duration("Stream #0:0: Video"), None);
+        assert_eq!(parse_ffmpeg_duration(""), None);
+    }
+
+    #[test]
+    fn parse_out_time_us_to_seconds() {
+        assert_eq!(parse_out_time_us("out_time_us=1500000"), Some(1.5));
+        assert_eq!(parse_out_time_us("out_time_us=0"), Some(0.0));
+        assert_eq!(parse_out_time_us("progress=continue"), None);
+    }
+
+    #[test]
+    fn progress_fraction_clamps_above_one() {
+        assert_eq!(progress_fraction(150.0, 100.0), 1.0);
+        assert!((progress_fraction(50.0, 100.0) - 0.5).abs() < 1e-9);
+        assert_eq!(progress_fraction(10.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn image_format_args_quality_per_format() {
+        let jpg = image_format_ffmpeg_args("jpg", 90);
+        assert!(jpg.iter().any(|(k, _)| k == "-q:v"));
+        let webp = image_format_ffmpeg_args("webp", 80);
+        assert!(webp.iter().any(|(k, v)| k == "-quality" && v == "80"));
+        let png = image_format_ffmpeg_args("png", 50);
+        assert!(!png.iter().any(|(k, _)| k == "-q:v" || k == "-quality"));
+        assert!(png.iter().any(|(k, _)| k == "-compression_level"));
+    }
+
+    #[test]
+    fn image_batch_summary_three_cases() {
+        assert!(image_batch_summary(12, 0, true).contains("12 de 12"));
+        assert!(image_batch_summary(8, 4, true).contains("8 de 12"));
+        assert!(image_batch_summary(8, 4, true).contains("4 falharam"));
+        assert!(image_batch_summary(0, 5, true).contains("Nenhuma"));
+        assert!(image_batch_summary(3, 0, false).contains("3 of 3"));
     }
 }

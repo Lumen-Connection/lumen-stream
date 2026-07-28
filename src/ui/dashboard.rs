@@ -1342,6 +1342,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
     let live_from_start;
     let is_live;
     let live_bytes;
+    let stage;
 
     {
         let op = app.operation.lock().unwrap();
@@ -1349,6 +1350,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
         progress = op.progress;
         is_live = op.is_live;
         live_bytes = op.live_bytes;
+        stage = op.stage;
         preview = op.preview.clone();
         url = op.url.clone();
         title = op.title.clone();
@@ -1925,6 +1927,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 op.output_format = new_format.clone();
                                 op.quality = new_quality.clone();
                                 op.progress = None;
+                                op.stage = crate::download::engine::Stage::Downloading;
                             }
 
                             let progress_state = app.operation.clone();
@@ -1932,12 +1935,21 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 match engine {
                                     Some(eng) => {
                                         let result = if captured_media_type == MediaType::Convert {
+                                            let on_progress =
+                                                move |pr: crate::download::engine::Progress| {
+                                                    if let Ok(mut s) = progress_state.lock() {
+                                                        s.progress = Some(
+                                                            (pr.fraction.clamp(0.0, 1.0)) as f32,
+                                                        );
+                                                    }
+                                                };
                                             eng.convert_file(
                                                 &captured_source,
                                                 &captured_path,
                                                 &captured_format,
                                                 &captured_preset,
                                                 captured_convert_engine,
+                                                on_progress,
                                             )
                                             .await
                                         } else {
@@ -1947,6 +1959,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                                         s.progress =
                                                             Some((pr.fraction.clamp(0.0, 1.0)) as f32);
                                                         s.live_bytes = pr.downloaded_bytes;
+                                                        s.stage = pr.stage;
                                                     }
                                                 };
                                             let opts = crate::download::engine::DownloadOptions {
@@ -2149,52 +2162,83 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 }
                             });
                         } else {
-                            // "Iniciando download..." fica obsoleto assim que os
-                            // primeiros bytes chegam — troca por um rótulo honesto.
-                            let display = if live_bytes > 0 && msg.starts_with("Iniciando") {
-                                if pt { "Baixando..." } else { "Downloading..." }
+                            use crate::download::engine::Stage;
+                            // Pós-processamento / re-encode: não há transferência.
+                            // Barra indeterminada + rótulo do estágio — nunca "100% + 0 B/s".
+                            let post_stage = stage != Stage::Downloading;
+                            let display: String = if post_stage {
+                                match stage {
+                                    Stage::PostProcessing => s.dl_stage_post.to_string(),
+                                    Stage::Transcoding => s.dl_stage_transcode.to_string(),
+                                    Stage::Finalizing => s.dl_stage_finalizing.to_string(),
+                                    Stage::Downloading => msg.clone(),
+                                }
+                            } else if live_bytes > 0 && msg.starts_with("Iniciando") {
+                                // "Iniciando download..." fica obsoleto assim que os
+                                // primeiros bytes chegam — troca por um rótulo honesto.
+                                if pt {
+                                    "Baixando...".to_string()
+                                } else {
+                                    "Downloading...".to_string()
+                                }
                             } else {
-                                msg.as_str()
+                                msg.clone()
                             };
                             ui.label(display);
-                            match progress {
-                                Some(p) => {
-                                    ui.add(
-                                        egui::ProgressBar::new(p)
-                                            .fill(theme::accent())
-                                            .show_percentage(),
-                                    );
-                                }
-                                None => {
-                                    ui.add(
-                                        egui::ProgressBar::new(0.0)
-                                            .fill(theme::accent())
-                                            .animate(true)
-                                            .text(s.dl_processing),
-                                    );
+                            if post_stage {
+                                ui.add(
+                                    egui::ProgressBar::new(0.0)
+                                        .fill(theme::accent())
+                                        .animate(true)
+                                        .text(match stage {
+                                            Stage::PostProcessing => s.dl_stage_post_bar,
+                                            Stage::Transcoding => s.dl_stage_transcode_bar,
+                                            Stage::Finalizing => s.dl_stage_finalizing,
+                                            Stage::Downloading => s.dl_processing,
+                                        }),
+                                );
+                            } else {
+                                match progress {
+                                    Some(p) => {
+                                        ui.add(
+                                            egui::ProgressBar::new(p)
+                                                .fill(theme::accent())
+                                                .show_percentage(),
+                                        );
+                                    }
+                                    None => {
+                                        ui.add(
+                                            egui::ProgressBar::new(0.0)
+                                                .fill(theme::accent())
+                                                .animate(true)
+                                                .text(s.dl_processing),
+                                        );
+                                    }
                                 }
                             }
-                            ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "⬇  {}/s",
-                                    crate::download::engine::format_size(speed as i64)
-                                ))
-                                .color(theme::accent())
-                                .strong(),
-                            );
-                            if live_bytes > 0 {
+                            if !post_stage {
+                                ui.add_space(8.0);
                                 ui.label(
                                     egui::RichText::new(format!(
-                                        "💾 {} {}",
-                                        crate::download::engine::format_size(live_bytes as i64),
-                                        if pt { "baixados" } else { "downloaded" }
+                                        "⬇  {}/s",
+                                        crate::download::engine::format_size(speed as i64)
                                     ))
-                                    .color(theme::text_muted())
-                                    .size(12.0),
+                                    .color(theme::accent())
+                                    .strong(),
                                 );
+                                if live_bytes > 0 {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "💾 {} {}",
+                                            crate::download::engine::format_size(live_bytes as i64),
+                                            if pt { "baixados" } else { "downloaded" }
+                                        ))
+                                        .color(theme::text_muted())
+                                        .size(12.0),
+                                    );
+                                }
+                                sparkline(ui, &hist);
                             }
-                            sparkline(ui, &hist);
                             ui.add_space(8.0);
                             if ui
                                 .add(

@@ -104,59 +104,46 @@ fn enqueue_input(app: &mut App) {
     for url in lines {
         if queue::is_playlist(&url) {
             let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
-            match (app.engine.clone(), queue::playlist_id_from_url(&url)) {
-                (Some(engine), Some(pid)) => {
-                    let jobs = app.queue.jobs.clone();
-                    let next_id = app.queue.next_id.clone();
-                    let toasts = app.toast_queue.clone();
-                    let (mt, fmt, q, dir) =
-                        (media_type, format.clone(), quality.clone(), folder.clone());
-                    // Feedback imediato: a busca da playlist roda em background e
-                    // antes falhava/pendurava em silêncio, sem nada aparecer na fila.
-                    app.toast(
-                        if pt { "Buscando itens da playlist..." } else { "Fetching playlist items..." },
-                        false,
+            let yt_pid = queue::playlist_id_from_url(&url);
+            let sp_pid = queue::spotify_playlist_id(&url);
+            match (app.engine.clone(), yt_pid, sp_pid) {
+                (Some(engine), Some(pid), _) => {
+                    enqueue_playlist_fetch(
+                        app,
+                        engine,
+                        media_type,
+                        format.clone(),
+                        quality.clone(),
+                        folder.clone(),
+                        pt,
+                        PlaylistSource::YouTube(pid),
                     );
-                    tokio::spawn(async move {
-                        let result = match engine.fetch_playlist(&pid).await {
-                            Ok(items) if !items.is_empty() => {
-                                let n = items.len();
-                                for (u, t) in items {
-                                    queue::push_job(
-                                        &jobs, &next_id, u, t, mt, fmt.clone(), q.clone(), dir.clone(),
-                                    );
-                                }
-                                (
-                                    if pt {
-                                        format!("{} itens da playlist adicionados à fila", n)
-                                    } else {
-                                        format!("{} playlist items added to the queue", n)
-                                    },
-                                    false,
-                                )
-                            }
-                            Ok(_) => (
-                                if pt { "Playlist vazia ou indisponível.".to_string() }
-                                else { "Playlist empty or unavailable.".to_string() },
-                                true,
-                            ),
-                            Err(e) => {
-                                let m = crate::download::engine::friendly_error(&e.to_string());
-                                (
-                                    if pt { format!("Falha ao buscar a playlist: {}", m) }
-                                    else { format!("Failed to fetch playlist: {}", m) },
-                                    true,
-                                )
-                            }
-                        };
-                        toasts.lock().unwrap().push(result);
-                    });
                 }
-                _ => app.toast(
+                (Some(engine), None, Some(pid)) => {
+                    enqueue_playlist_fetch(
+                        app,
+                        engine,
+                        media_type,
+                        format.clone(),
+                        quality.clone(),
+                        folder.clone(),
+                        pt,
+                        PlaylistSource::Spotify(pid),
+                    );
+                }
+                (None, _, _) => app.toast(
                     if pt {
                         "Aguarde o app terminar de iniciar e tente novamente."
                     } else {
                         "Wait for the app to finish starting and try again."
+                    },
+                    true,
+                ),
+                _ => app.toast(
+                    if pt {
+                        "Não foi possível identificar a playlist."
+                    } else {
+                        "Could not identify the playlist."
                     },
                     true,
                 ),
@@ -176,8 +163,98 @@ fn enqueue_input(app: &mut App) {
     app.batch_input.clear();
 }
 
+enum PlaylistSource {
+    YouTube(String),
+    Spotify(String),
+}
+
+fn enqueue_playlist_fetch(
+    app: &mut App,
+    engine: std::sync::Arc<crate::download::engine::DownloadEngine>,
+    media_type: MediaType,
+    format: String,
+    quality: String,
+    folder: std::path::PathBuf,
+    pt: bool,
+    source: PlaylistSource,
+) {
+    let jobs = app.queue.jobs.clone();
+    let next_id = app.queue.next_id.clone();
+    let toasts = app.toast_queue.clone();
+    // Feedback imediato: a busca da playlist roda em background e
+    // antes falhava/pendurava em silêncio, sem nada aparecer na fila.
+    app.toast(
+        if pt {
+            "Buscando itens da playlist..."
+        } else {
+            "Fetching playlist items..."
+        },
+        false,
+    );
+    tokio::spawn(async move {
+        let fetch = match &source {
+            PlaylistSource::YouTube(pid) => engine.fetch_playlist(pid).await,
+            PlaylistSource::Spotify(pid) => engine.fetch_spotify_playlist(pid).await,
+        };
+        let result = match fetch {
+            Ok(items) if !items.is_empty() => {
+                let n = items.len();
+                for (u, t) in items {
+                    queue::push_job(
+                        &jobs,
+                        &next_id,
+                        u,
+                        t,
+                        media_type,
+                        format.clone(),
+                        quality.clone(),
+                        folder.clone(),
+                    );
+                }
+                (
+                    if pt {
+                        format!("{} itens da playlist adicionados à fila", n)
+                    } else {
+                        format!("{} playlist items added to the queue", n)
+                    },
+                    false,
+                )
+            }
+            Ok(_) => (
+                if pt {
+                    "Playlist vazia ou indisponível.".to_string()
+                } else {
+                    "Playlist empty or unavailable.".to_string()
+                },
+                true,
+            ),
+            Err(e) => {
+                let m = crate::download::engine::friendly_error(&e.to_string());
+                (
+                    if pt {
+                        format!("Falha ao buscar a playlist: {}", m)
+                    } else {
+                        format!("Failed to fetch playlist: {}", m)
+                    },
+                    true,
+                )
+            }
+        };
+        toasts.lock().unwrap().push(result);
+    });
+}
+
 fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
-    let snapshot: Vec<(u64, String, String, JobStatus, Option<f32>, f32, u64)> = app
+    let snapshot: Vec<(
+        u64,
+        String,
+        String,
+        JobStatus,
+        Option<f32>,
+        f32,
+        u64,
+        crate::download::engine::Stage,
+    )> = app
         .queue
         .jobs
         .lock()
@@ -189,7 +266,16 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
             } else {
                 j.title.clone()
             };
-            (j.id, title, j.format.clone(), j.status.clone(), j.progress, j.speed, j.eta)
+            (
+                j.id,
+                title,
+                j.format.clone(),
+                j.status.clone(),
+                j.progress,
+                j.speed,
+                j.eta,
+                j.stage,
+            )
         })
         .collect();
 
@@ -216,7 +302,7 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
 
     theme::card_frame().show(ui, |ui| {
         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-            for (id, title, format, status, progress, speed, eta) in &snapshot {
+            for (id, title, format, status, progress, speed, eta, stage) in &snapshot {
                 ui.horizontal(|ui| {
                     let (label, color) = status_label(status, s);
                     ui.add_sized(
@@ -232,39 +318,57 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
                         );
                         match status {
                             JobStatus::Running => {
-                                match progress {
-                                    Some(p) => {
-                                        ui.add(
-                                            egui::ProgressBar::new(*p)
-                                                .desired_width(330.0)
-                                                .fill(theme::accent())
-                                                .show_percentage(),
-                                        );
-                                    }
-                                    None => {
-                                        ui.add(
-                                            egui::ProgressBar::new(0.0)
-                                                .desired_width(330.0)
-                                                .fill(theme::accent())
-                                                .animate(true),
-                                        );
-                                    }
-                                }
-                                if *speed > 0.0 {
-                                    let eta_txt = if *eta > 0 {
-                                        format!(" · ETA {}:{:02}", eta / 60, eta % 60)
-                                    } else {
-                                        String::new()
+                                use crate::download::engine::Stage;
+                                let post = *stage != Stage::Downloading;
+                                if post {
+                                    let bar_txt = match stage {
+                                        Stage::PostProcessing => s.dl_stage_post_bar,
+                                        Stage::Transcoding => s.dl_stage_transcode_bar,
+                                        Stage::Finalizing => s.dl_stage_finalizing,
+                                        Stage::Downloading => s.dl_processing,
                                     };
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{}/s{}",
-                                            crate::download::engine::format_size(*speed as i64),
-                                            eta_txt
-                                        ))
-                                        .color(theme::text_muted())
-                                        .size(11.0),
+                                    ui.add(
+                                        egui::ProgressBar::new(0.0)
+                                            .desired_width(330.0)
+                                            .fill(theme::accent())
+                                            .animate(true)
+                                            .text(bar_txt),
                                     );
+                                } else {
+                                    match progress {
+                                        Some(p) => {
+                                            ui.add(
+                                                egui::ProgressBar::new(*p)
+                                                    .desired_width(330.0)
+                                                    .fill(theme::accent())
+                                                    .show_percentage(),
+                                            );
+                                        }
+                                        None => {
+                                            ui.add(
+                                                egui::ProgressBar::new(0.0)
+                                                    .desired_width(330.0)
+                                                    .fill(theme::accent())
+                                                    .animate(true),
+                                            );
+                                        }
+                                    }
+                                    if *speed > 0.0 {
+                                        let eta_txt = if *eta > 0 {
+                                            format!(" · ETA {}:{:02}", eta / 60, eta % 60)
+                                        } else {
+                                            String::new()
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{}/s{}",
+                                                crate::download::engine::format_size(*speed as i64),
+                                                eta_txt
+                                            ))
+                                            .color(theme::text_muted())
+                                            .size(11.0),
+                                        );
+                                    }
                                 }
                             }
                             JobStatus::Failed(e) => {

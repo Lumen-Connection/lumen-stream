@@ -10,6 +10,7 @@ mod audio_tags;
 mod convert;
 mod download;
 mod fs_utils;
+mod markdown;
 mod media;
 mod models;
 mod net;
@@ -21,9 +22,10 @@ mod ytdlp_util;
 
 pub use audio_tags::{read_audio_tags, write_audio_tags, AudioTags};
 pub use fs_utils::{cleanup_partials, cleanup_temp_dir, part_bytes};
+pub use media::image_batch_summary;
 pub use models::{
     categorize, format_size, organize_subfolder, output_formats, video_profile, video_profiles,
-    DownloadOptions, FileCategory, FormatRow, NetStats, Progress, VideoPreview, VideoProfile,
+    DownloadOptions, FileCategory, FormatRow, NetStats, Progress, Stage, VideoPreview, VideoProfile,
 };
 pub use office::engine_status;
 pub use text_utils::{apply_template, sanitize_filename, smart_clean_name};
@@ -221,6 +223,29 @@ mod tests {
         assert!(
             items.iter().all(|(u, _)| u.contains("watch?v=")),
             "cada item deve ter uma URL de vídeo do YouTube"
+        );
+    }
+
+    // Rede, opt-in: alarme se o embed do Spotify mudar o HTML e o parser
+    // deixar de achar faixas. Nunca roda no CI. `cargo test -- --ignored`.
+    #[ignore]
+    #[tokio::test]
+    async fn spotify_embed_playlist_returns_items() {
+        let out = std::env::temp_dir().join("lumen_stream_engine_test_sp");
+        let engine = DownloadEngine::new(out).await.expect("engine deve inicializar");
+        // Playlist pública estável (Today's Top Hits — id pode mudar; basta ser pública).
+        let res = tokio::time::timeout(
+            Duration::from_secs(60),
+            engine.fetch_spotify_playlist("37i9dQZF1DXcBWIGoYBM5M"),
+        )
+        .await;
+        let items = res
+            .expect("fetch_spotify_playlist não deve pendurar")
+            .expect("fetch_spotify_playlist deve retornar itens");
+        assert!(!items.is_empty(), "playlist Spotify deve ter faixas");
+        assert!(
+            items.iter().all(|(u, t)| u.starts_with("ytsearch1:") && !t.is_empty()),
+            "cada item deve ser ytsearch1:Artista - Faixa"
         );
     }
 }

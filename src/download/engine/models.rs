@@ -4,12 +4,24 @@ use std::sync::Arc;
 
 use super::text_utils::sanitize_filename;
 
+/// Estágio da operação de download. Default = Downloading para não quebrar
+/// callers que montam `Progress` só com fração/bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Stage {
+    #[default]
+    Downloading,
+    PostProcessing,
+    Transcoding,
+    Finalizing,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct Progress {
     pub fraction: f64,
     pub speed_bps: f64,
     pub eta_secs: u64,
     pub downloaded_bytes: u64,
+    pub stage: Stage,
 }
 
 #[derive(Default)]
@@ -197,6 +209,8 @@ pub enum FileCategory {
     Image,
     Document,
     Office,
+    /// Markdown de entrada — saída própria (pdf/html/txt), nunca md→md.
+    Markdown,
     Unknown,
 }
 
@@ -215,8 +229,9 @@ pub fn categorize(path: &Path) -> FileCategory {
             FileCategory::Image
         }
         "pdf" => FileCategory::Document,
+        "md" | "markdown" => FileCategory::Markdown,
         "doc" | "docx" | "odt" | "rtf" | "txt" | "ppt" | "pptx" | "odp" | "xls" | "xlsx"
-        | "ods" | "csv" | "epub" => FileCategory::Office,
+        | "ods" | "csv" | "epub" | "html" | "htm" => FileCategory::Office,
         _ => FileCategory::Unknown,
     }
 }
@@ -228,8 +243,10 @@ pub fn output_formats(category: FileCategory) -> Vec<&'static str> {
             "mp4", "mkv", "webm", "avi", "mov", "gif", "mp3", "m4a", "wav",
         ],
         FileCategory::Image => vec!["jpg", "png", "webp", "bmp", "tiff", "gif", "pdf"],
-        FileCategory::Document => vec!["png", "jpg", "txt"],
-        FileCategory::Office => vec!["pdf", "txt"],
+        FileCategory::Document => vec!["png", "jpg", "txt", "md"],
+        FileCategory::Office => vec!["pdf", "txt", "md"],
+        // md → md não faz sentido; motor nativo sempre.
+        FileCategory::Markdown => vec!["pdf", "html", "txt"],
         FileCategory::Unknown => vec![],
     }
 }
@@ -311,6 +328,8 @@ mod tests {
             ("a.pdf", FileCategory::Document),
             ("a.docx", FileCategory::Office),
             ("a.xlsx", FileCategory::Office),
+            ("a.md", FileCategory::Markdown),
+            ("a.markdown", FileCategory::Markdown),
             ("a.xyz", FileCategory::Unknown),
             ("sem_extensao", FileCategory::Unknown),
         ];
@@ -328,6 +347,10 @@ mod tests {
         assert!(output_formats(FileCategory::Video).contains(&"mp4"));
         assert!(output_formats(FileCategory::Image).contains(&"png"));
         assert!(output_formats(FileCategory::Office).contains(&"pdf"));
+        assert!(output_formats(FileCategory::Office).contains(&"md"));
+        assert!(output_formats(FileCategory::Document).contains(&"md"));
+        assert!(output_formats(FileCategory::Markdown).contains(&"html"));
+        assert!(!output_formats(FileCategory::Markdown).contains(&"md"));
         assert!(output_formats(FileCategory::Unknown).is_empty());
     }
 
