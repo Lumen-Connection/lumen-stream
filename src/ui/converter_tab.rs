@@ -867,6 +867,30 @@ fn watermark_flow(app: &mut App) {
     }));
 }
 
+/// Centraliza uma linha horizontal no card.
+/// `ui.horizontal` sozinho ocupa a largura toda e alinha à esquerda mesmo
+/// dentro de `vertical_centered` — medimos a largura do conteúdo no frame
+/// anterior e aplicamos padding simétrico.
+fn centered_h_row(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let id = ui.id().with(id_salt);
+    let content_w = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(id))
+        .unwrap_or(120.0);
+    ui.horizontal(|ui| {
+        let pad = ((ui.available_width() - content_w) * 0.5).max(0.0);
+        ui.add_space(pad);
+        let start_x = ui.cursor().left();
+        add_contents(ui);
+        let used = (ui.cursor().left() - start_x).max(1.0);
+        ui.ctx().data_mut(|d| d.insert_temp(id, used));
+    });
+}
+
 fn image_batch_card(app: &mut App, ui: &mut egui::Ui) {
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
     let mut pick = false;
@@ -900,7 +924,7 @@ fn image_batch_card(app: &mut App, ui: &mut egui::Ui) {
             );
             ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
+            centered_h_row(ui, "img_batch_fmt", |ui| {
                 ui.label(if pt { "Formato" } else { "Format" });
                 for f in ["jpg", "png", "webp"] {
                     let sel = app.config.image_format == f;
@@ -918,7 +942,7 @@ fn image_batch_card(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(6.0);
 
             // Presets de largura no lugar do slider 0..=3840.
-            ui.horizontal(|ui| {
+            centered_h_row(ui, "img_batch_w", |ui| {
                 ui.label(if pt { "Largura" } else { "Width" });
                 for (label, w) in [
                     (if pt { "Original" } else { "Original" }, 0u32),
@@ -942,10 +966,13 @@ fn image_batch_card(app: &mut App, ui: &mut egui::Ui) {
 
             // PNG é sem perdas: o slider de qualidade não tem efeito.
             if app.config.image_format != "png" {
-                ui.horizontal(|ui| {
+                centered_h_row(ui, "img_batch_q", |ui| {
                     ui.label(if pt { "Qualidade" } else { "Quality" });
                     if ui
-                        .add(egui::Slider::new(&mut app.config.image_quality, 10..=100))
+                        .add_sized(
+                            egui::vec2(160.0, 18.0),
+                            egui::Slider::new(&mut app.config.image_quality, 10..=100),
+                        )
                         .changed()
                     {
                         cfg_dirty = true;
@@ -1003,7 +1030,7 @@ fn image_batch_card(app: &mut App, ui: &mut egui::Ui) {
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
-                ui.horizontal(|ui| {
+                centered_h_row(ui, "img_batch_dir", |ui| {
                     ui.label(
                         egui::RichText::new(if pt { "Destino:" } else { "Output:" })
                             .color(theme::text_muted())
@@ -1027,15 +1054,16 @@ fn image_batch_card(app: &mut App, ui: &mut egui::Ui) {
                 });
 
                 ui.add_space(4.0);
+                // Lista de arquivos: centraliza cada linha nome + ✕.
                 egui::ScrollArea::vertical()
                     .max_height(120.0)
                     .show(ui, |ui| {
                         for (i, f) in app.image_batch_files.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                let name = f
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| f.to_string_lossy().to_string());
+                            let name = f
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| f.to_string_lossy().to_string());
+                            centered_h_row(ui, ("img_batch_file", i), |ui| {
                                 ui.label(
                                     egui::RichText::new(name)
                                         .color(theme::text())
@@ -1062,7 +1090,7 @@ fn image_batch_card(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     format!("Convert {} images", n)
                 };
-                ui.horizontal(|ui| {
+                centered_h_row(ui, "img_batch_actions", |ui| {
                     if ui.add(theme::accent_button(&convert_label)).clicked() {
                         convert = true;
                     }
