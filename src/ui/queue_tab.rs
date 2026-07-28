@@ -330,55 +330,68 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
                         match status {
                             JobStatus::Running => {
                                 use crate::download::engine::Stage;
-                                let post = *stage != Stage::Downloading;
-                                if post {
-                                    let bar_txt = match stage {
-                                        Stage::PostProcessing => s.dl_stage_post_bar,
-                                        Stage::Transcoding => s.dl_stage_transcode_bar,
-                                        Stage::Finalizing => s.dl_stage_finalizing,
-                                        Stage::Downloading => s.dl_processing,
-                                    };
-                                    ui.add(
-                                        egui::ProgressBar::new(0.0)
-                                            .desired_width(330.0)
-                                            .fill(theme::accent())
-                                            .animate(true)
-                                            .text(bar_txt),
-                                    );
-                                } else {
-                                    match progress {
-                                        Some(p) => {
-                                            ui.add(
-                                                egui::ProgressBar::new(*p)
-                                                    .desired_width(330.0)
-                                                    .fill(theme::accent())
-                                                    .show_percentage(),
-                                            );
-                                        }
-                                        None => {
-                                            ui.add(
-                                                egui::ProgressBar::new(0.0)
-                                                    .desired_width(330.0)
-                                                    .fill(theme::accent())
-                                                    .animate(true),
-                                            );
-                                        }
-                                    }
-                                    if *speed > 0.0 {
-                                        let eta_txt = if *eta > 0 {
-                                            format!(" · ETA {}:{:02}", eta / 60, eta % 60)
-                                        } else {
-                                            String::new()
-                                        };
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "{}/s{}",
-                                                crate::download::engine::format_size(*speed as i64),
-                                                eta_txt
-                                            ))
-                                            .color(theme::text_muted())
-                                            .size(11.0),
+                                match stage {
+                                    Stage::Transcoding => {
+                                        let p = progress.unwrap_or(0.0).clamp(0.0, 1.0);
+                                        ui.add(
+                                            egui::ProgressBar::new(p)
+                                                .desired_width(330.0)
+                                                .fill(theme::accent())
+                                                .show_percentage()
+                                                .text(s.dl_stage_transcode_bar),
                                         );
+                                    }
+                                    Stage::PostProcessing | Stage::Finalizing => {
+                                        let bar_txt = match stage {
+                                            Stage::PostProcessing => s.dl_stage_post_bar,
+                                            Stage::Finalizing => s.dl_stage_finalizing,
+                                            _ => s.dl_processing,
+                                        };
+                                        ui.add(
+                                            egui::ProgressBar::new(0.0)
+                                                .desired_width(330.0)
+                                                .fill(theme::accent())
+                                                .animate(true)
+                                                .text(bar_txt),
+                                        );
+                                    }
+                                    Stage::Downloading => {
+                                        match progress {
+                                            Some(p) => {
+                                                ui.add(
+                                                    egui::ProgressBar::new(*p)
+                                                        .desired_width(330.0)
+                                                        .fill(theme::accent())
+                                                        .show_percentage(),
+                                                );
+                                            }
+                                            None => {
+                                                ui.add(
+                                                    egui::ProgressBar::new(0.0)
+                                                        .desired_width(330.0)
+                                                        .fill(theme::accent())
+                                                        .animate(true),
+                                                );
+                                            }
+                                        }
+                                        if *speed > 0.0 {
+                                            let eta_txt = if *eta > 0 {
+                                                format!(" · ETA {}:{:02}", eta / 60, eta % 60)
+                                            } else {
+                                                String::new()
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{}/s{}",
+                                                    crate::download::engine::format_size(
+                                                        *speed as i64
+                                                    ),
+                                                    eta_txt
+                                                ))
+                                                .color(theme::text_muted())
+                                                .size(11.0),
+                                            );
+                                        }
                                     }
                                 }
                             }

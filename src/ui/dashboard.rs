@@ -2163,8 +2163,9 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                             });
                         } else {
                             use crate::download::engine::Stage;
-                            // Pós-processamento / re-encode: não há transferência.
-                            // Barra indeterminada + rótulo do estágio — nunca "100% + 0 B/s".
+                            // Pós-processamento: sem transferência (some B/s).
+                            // Transcoding: % real do ffmpeg — vídeo longo sem %
+                            // parece travado.
                             let post_stage = stage != Stage::Downloading;
                             let display: String = if post_stage {
                                 match stage {
@@ -2185,20 +2186,30 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                 msg.clone()
                             };
                             ui.label(display);
-                            if post_stage {
-                                ui.add(
-                                    egui::ProgressBar::new(0.0)
-                                        .fill(theme::accent())
-                                        .animate(true)
-                                        .text(match stage {
-                                            Stage::PostProcessing => s.dl_stage_post_bar,
-                                            Stage::Transcoding => s.dl_stage_transcode_bar,
-                                            Stage::Finalizing => s.dl_stage_finalizing,
-                                            Stage::Downloading => s.dl_processing,
-                                        }),
-                                );
-                            } else {
-                                match progress {
+                            match stage {
+                                Stage::Transcoding => {
+                                    // Progresso real do re-encode (out_time / duração).
+                                    let p = progress.unwrap_or(0.0).clamp(0.0, 1.0);
+                                    ui.add(
+                                        egui::ProgressBar::new(p)
+                                            .fill(theme::accent())
+                                            .show_percentage()
+                                            .text(s.dl_stage_transcode_bar),
+                                    );
+                                }
+                                Stage::PostProcessing | Stage::Finalizing => {
+                                    ui.add(
+                                        egui::ProgressBar::new(0.0)
+                                            .fill(theme::accent())
+                                            .animate(true)
+                                            .text(match stage {
+                                                Stage::PostProcessing => s.dl_stage_post_bar,
+                                                Stage::Finalizing => s.dl_stage_finalizing,
+                                                _ => s.dl_processing,
+                                            }),
+                                    );
+                                }
+                                Stage::Downloading => match progress {
                                     Some(p) => {
                                         ui.add(
                                             egui::ProgressBar::new(p)
@@ -2214,7 +2225,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                                 .text(s.dl_processing),
                                         );
                                     }
-                                }
+                                },
                             }
                             if !post_stage {
                                 ui.add_space(8.0);

@@ -85,13 +85,24 @@ impl DownloadEngine {
         let source = self.ytdlp_download(url, &source, &opts, &on_progress).await?;
 
         // Re-encode completo (libx264/av1/vp9): em máquina fraca leva minutos.
-        // Emite estágio antes de começar para a UI não ficar em "100% + 0 B/s".
+        // Começa em 0% no estágio Transcoding e repassa o progresso real do ffmpeg.
         on_progress(Progress {
-            fraction: 1.0,
+            fraction: 0.0,
             stage: Stage::Transcoding,
             ..Default::default()
         });
-        let transcode = self.transcode_video_profile(&source, &out, &opts.format).await;
+        let on_tc = |pr: Progress| {
+            on_progress(Progress {
+                fraction: pr.fraction,
+                stage: Stage::Transcoding,
+                speed_bps: 0.0,
+                eta_secs: pr.eta_secs,
+                downloaded_bytes: 0,
+            });
+        };
+        let transcode = self
+            .transcode_video_profile(&source, &out, &opts.format, Some(&on_tc))
+            .await;
         match transcode {
             Ok(()) => {
                 move_subtitle_sidecars(&source, &out);

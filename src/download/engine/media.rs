@@ -126,12 +126,19 @@ impl DownloadEngine {
     /// Re-encodes a downloaded video source into one of Lumen Stream's named
     /// video profiles. This is deliberately separate from yt-dlp's merge step:
     /// a container extension alone does not guarantee the stream codecs.
-    pub(super) async fn transcode_video_profile(
+    ///
+    /// `on_progress` recebe fração real do ffmpeg (`out_time` / duração) para a
+    /// UI não ficar sem % durante re-encodes longos pós-download.
+    pub(super) async fn transcode_video_profile<F>(
         &self,
         input: &Path,
         output: &Path,
         format: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        on_progress: Option<&F>,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: Fn(Progress) + Send + Sync,
+    {
         let profile = super::video_profile(format)
             .ok_or_else(|| format!("perfil de vídeo desconhecido: {}", format))?;
         let temp_output = profile_temp_output(output);
@@ -151,13 +158,12 @@ impl DownloadEngine {
             .args(video_profile_ffmpeg_args(profile))
             .arg(&temp_output);
 
-        // Sem callback de UI aqui: o estágio Transcoding da task 01 já cobre
-        // o feedback honesto; o progresso percentual é da conversão avulsa.
-        let nop = |_: Progress| {};
-        self.run_ffmpeg_progress(cmd, total, Some(&nop)).await.map_err(|e| {
-            let _ = std::fs::remove_file(&temp_output);
-            e
-        })?;
+        self.run_ffmpeg_progress(cmd, total, on_progress)
+            .await
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&temp_output);
+                e
+            })?;
 
         if std::fs::metadata(&temp_output)
             .map(|metadata| metadata.len() == 0)
