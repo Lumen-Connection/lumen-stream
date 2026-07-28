@@ -3,8 +3,26 @@ use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
-use super::models::{AudioMeta, Progress};
+use super::models::{AudioMeta, Progress, Stage, VideoProfile};
 use super::DownloadEngine;
+
+/// Codecs normalizados lidos do `ffmpeg -i`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamCodecs {
+    pub video: Option<String>,
+    pub audio: Option<String>,
+}
+
+/// Como finalizar o arquivo baixado no perfil pedido.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizeMode {
+    /// Já está no codec certo → só remux (`-c copy`), quase instantâneo.
+    RemuxCopy,
+    /// Vídeo ok, áudio não → re-encode só do áudio.
+    RecodeAudio,
+    /// Precisa re-encode completo (lento).
+    FullEncode,
+}
 
 /// Extrai `Duration: HH:MM:SS.xx` do stderr do ffmpeg.
 pub(super) fn parse_ffmpeg_duration(text: &str) -> Option<f64> {
@@ -40,6 +58,101 @@ pub(super) fn progress_fraction(out_time_secs: f64, total_secs: f64) -> f64 {
         return 0.0;
     }
     (out_time_secs / total_secs).clamp(0.0, 1.0)
+}
+
+/// Extrai codecs de vídeo/áudio do stderr do `ffmpeg -i`.
+pub(super) fn parse_ffmpeg_stream_codecs(text: &str) -> StreamCodecs {
+    let mut out = StreamCodecs::default();
+    for line in text.lines() {
+        let t = line.trim();
+        // Ex.: Stream #0:0(und): Video: h264 (avc1 / 0x31637661), ...
+        if let Some(rest) = t.split_once("Video:").map(|(_, r)| r.trim()) {
+            if out.video.is_none() {
+                let token = rest.split_whitespace().next().unwrap_or("").trim_matches(',');
+                out.video = Some(normalize_video_codec(token));
+            }
+        } else if let Some(rest) = t.split_once("Audio:").map(|(_, r)| r.trim()) {
+            if out.audio.is_none() {
+                let token = rest.split_whitespace().next().unwrap_or("").trim_matches(',');
+                out.audio = Some(normalize_audio_codec(token));
+            }
+        }
+    }
+    out
+}
+
+pub(super) fn normalize_video_codec(raw: &str) -> String {
+    let r = raw.to_ascii_lowercase();
+    if r.starts_with("h264") || r.starts_with("avc") {
+        "h264".into()
+    } else if r.starts_with("hevc") || r.starts_with("h265") {
+        "hevc".into()
+    } else if r.starts_with("av1") || r.starts_with("av01") {
+        "av1".into()
+    } else if r.starts_with("vp9") || r.starts_with("vp09") {
+        "vp9".into()
+    } else if r.starts_with("vp8") {
+        "vp8".into()
+    } else {
+        r
+    }
+}
+
+pub(super) fn normalize_audio_codec(raw: &str) -> String {
+    let r = raw.to_ascii_lowercase();
+    if r.starts_with("aac") || r.starts_with("mp4a") {
+        "aac".into()
+    } else if r.starts_with("opus") {
+        "opus".into()
+    } else if r.starts_with("vorbis") {
+        "vorbis".into()
+    } else if r.starts_with("flac") {
+        "flac".into()
+    } else if r.starts_with("mp3") || r.starts_with("libmp3") {
+        "mp3".into()
+    } else {
+        r
+    }
+}
+
+/// Decide se dá para só remuxar (rápido) ou precisa re-encodar.
+pub(super) fn finalize_mode(profile: &VideoProfile, codecs: &StreamCodecs) -> FinalizeMode {
+    let v = codecs.video.as_deref();
+    let a = codecs.audio.as_deref();
+    match profile.extension {
+        "mp4" => {
+            // Perfil H.264 (MP4): YouTube costuma entregar avc1+mp4a → remux.
+            let v_ok = v == Some("h264");
+            let a_ok = matches!(a, Some("aac") | None);
+            if v_ok && a_ok {
+                FinalizeMode::RemuxCopy
+            } else if v_ok {
+                FinalizeMode::RecodeAudio
+            } else {
+                FinalizeMode::FullEncode
+            }
+        }
+        "webm" => {
+            let v_ok = matches!(v, Some("vp9") | Some("vp8"));
+            let a_ok = matches!(a, Some("opus") | Some("vorbis") | None);
+            if v_ok && a_ok {
+                FinalizeMode::RemuxCopy
+            } else if v_ok {
+                FinalizeMode::RecodeAudio
+            } else {
+                FinalizeMode::FullEncode
+            }
+        }
+        "mkv" => {
+            // Perfil AV1: só remux se já for AV1 (áudio livre no MKV).
+            if v == Some("av1") {
+                FinalizeMode::RemuxCopy
+            } else {
+                FinalizeMode::FullEncode
+            }
+        }
+        _ => FinalizeMode::FullEncode,
+    }
 }
 
 impl DownloadEngine {
@@ -161,12 +274,26 @@ impl DownloadEngine {
         Ok(())
     }
 
-    /// Re-encodes a downloaded video source into one of Lumen Stream's named
-    /// video profiles. This is deliberately separate from yt-dlp's merge step:
-    /// a container extension alone does not guarantee the stream codecs.
+    async fn probe_stream_codecs(&self, input: &Path) -> StreamCodecs {
+        let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
+        cmd.arg("-hide_banner")
+            .arg("-nostdin")
+            .arg("-i")
+            .arg(input);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000);
+        let output = match cmd.output().await {
+            Ok(o) => o,
+            Err(_) => return StreamCodecs::default(),
+        };
+        parse_ffmpeg_stream_codecs(&String::from_utf8_lossy(&output.stderr))
+    }
+
+    /// Finaliza o vídeo baixado no perfil (MP4/H.264, MKV/AV1, WebM/VP9).
     ///
-    /// `on_progress` recebe fração real do ffmpeg (`out_time` / duração) para a
-    /// UI não ficar sem % durante re-encodes longos pós-download.
+    /// Preferência: **remux com `-c copy`** quando os codecs já batem (quase
+    /// instantâneo). Re-encode completo só quando o vídeo de origem não é
+    /// compatível — era o caminho lento que parecia "conversão infinita".
     pub(super) async fn transcode_video_profile<F>(
         &self,
         input: &Path,
@@ -182,26 +309,137 @@ impl DownloadEngine {
         let temp_output = profile_temp_output(output);
         let _ = std::fs::remove_file(&temp_output);
 
-        let total = self.probe_duration_secs(input).await;
+        let codecs = self.probe_stream_codecs(input).await;
+        let mode = finalize_mode(profile, &codecs);
+        crate::applog::info(&format!(
+            "finalize vídeo: perfil={} v={:?} a={:?} modo={:?}",
+            profile.extension, codecs.video, codecs.audio, mode
+        ));
+
         let input = input.to_path_buf();
-        let enc_args: Vec<&'static str> = video_profile_ffmpeg_args(profile);
-        self.run_ffmpeg_progress(total, on_progress, |cmd| {
-            cmd.arg("-i")
-                .arg(&input)
-                .arg("-map")
-                .arg("0:v:0")
-                .arg("-map")
-                .arg("0:a?")
-                .arg("-map_metadata")
-                .arg("0")
-                .args(&enc_args)
-                .arg(&temp_output);
-        })
-        .await
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&temp_output);
-            e
-        })?;
+        match mode {
+            FinalizeMode::RemuxCopy => {
+                // Quase instantâneo: só remuxa streams, sem re-encode.
+                let on_fin = |pr: Progress| {
+                    if let Some(cb) = on_progress {
+                        cb(Progress {
+                            fraction: pr.fraction,
+                            stage: Stage::Finalizing,
+                            ..Default::default()
+                        });
+                    }
+                };
+                on_fin(Progress {
+                    fraction: 0.0,
+                    stage: Stage::Finalizing,
+                    ..Default::default()
+                });
+                self.run_ffmpeg_progress(None, Some(&on_fin), |cmd| {
+                    cmd.arg("-i")
+                        .arg(&input)
+                        .arg("-map")
+                        .arg("0:v:0")
+                        .arg("-map")
+                        .arg("0:a?")
+                        .arg("-map_metadata")
+                        .arg("0")
+                        .arg("-c")
+                        .arg("copy");
+                    if profile.extension == "mp4" {
+                        cmd.arg("-movflags").arg("+faststart");
+                    }
+                    cmd.arg(&temp_output);
+                })
+                .await
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&temp_output);
+                    e
+                })?;
+            }
+            FinalizeMode::RecodeAudio => {
+                // Vídeo copiado; só o áudio é re-encodado (bem mais rápido).
+                let on_fin = |pr: Progress| {
+                    if let Some(cb) = on_progress {
+                        cb(Progress {
+                            fraction: pr.fraction,
+                            stage: Stage::Finalizing,
+                            ..Default::default()
+                        });
+                    }
+                };
+                on_fin(Progress {
+                    fraction: 0.0,
+                    stage: Stage::Finalizing,
+                    ..Default::default()
+                });
+                let total = self.probe_duration_secs(&input).await;
+                let audio_enc = profile.audio_encoder;
+                self.run_ffmpeg_progress(total, Some(&on_fin), |cmd| {
+                    cmd.arg("-i")
+                        .arg(&input)
+                        .arg("-map")
+                        .arg("0:v:0")
+                        .arg("-map")
+                        .arg("0:a?")
+                        .arg("-map_metadata")
+                        .arg("0")
+                        .arg("-c:v")
+                        .arg("copy")
+                        .arg("-c:a")
+                        .arg(audio_enc);
+                    if audio_enc == "aac" {
+                        cmd.arg("-b:a").arg("192k");
+                    } else if audio_enc == "libopus" {
+                        cmd.arg("-b:a").arg("160k");
+                    }
+                    if profile.extension == "mp4" {
+                        cmd.arg("-movflags").arg("+faststart");
+                    }
+                    cmd.arg(&temp_output);
+                })
+                .await
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&temp_output);
+                    e
+                })?;
+            }
+            FinalizeMode::FullEncode => {
+                // Último recurso: re-encode completo (ex.: AV1 pedido e fonte é H.264).
+                let on_tc = |pr: Progress| {
+                    if let Some(cb) = on_progress {
+                        cb(Progress {
+                            fraction: pr.fraction,
+                            stage: Stage::Transcoding,
+                            ..Default::default()
+                        });
+                    }
+                };
+                on_tc(Progress {
+                    fraction: 0.0,
+                    stage: Stage::Transcoding,
+                    ..Default::default()
+                });
+                let total = self.probe_duration_secs(&input).await;
+                let enc_args: Vec<&'static str> = video_profile_ffmpeg_args(profile);
+                self.run_ffmpeg_progress(total, Some(&on_tc), |cmd| {
+                    cmd.arg("-i")
+                        .arg(&input)
+                        .arg("-map")
+                        .arg("0:v:0")
+                        .arg("-map")
+                        .arg("0:a?")
+                        .arg("-map_metadata")
+                        .arg("0")
+                        .args(&enc_args)
+                        .arg(&temp_output);
+                })
+                .await
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&temp_output);
+                    e
+                })?;
+            }
+        }
 
         if std::fs::metadata(&temp_output)
             .map(|metadata| metadata.len() == 0)
@@ -858,6 +1096,76 @@ mod tests {
         assert_eq!(parse_out_time_us("out_time_us=0"), Some(0.0));
         assert_eq!(parse_out_time_us("out_time_ms=2500"), Some(2.5));
         assert_eq!(parse_out_time_us("progress=continue"), None);
+    }
+
+    #[test]
+    fn parse_stream_codecs_from_ffmpeg_probe() {
+        let stderr = r#"
+  Duration: 00:01:00.00, start: 0.000000
+  Stream #0:0(und): Video: h264 (avc1 / 0x31637661), yuv420p, 1920x1080
+  Stream #0:1(eng): Audio: aac (mp4a / 0x6134706D), 48000 Hz, stereo
+"#;
+        let c = parse_ffmpeg_stream_codecs(stderr);
+        assert_eq!(c.video.as_deref(), Some("h264"));
+        assert_eq!(c.audio.as_deref(), Some("aac"));
+    }
+
+    #[test]
+    fn finalize_mode_prefers_remux_for_matching_mp4() {
+        let mp4 = super::super::video_profile("mp4").unwrap();
+        let ok = StreamCodecs {
+            video: Some("h264".into()),
+            audio: Some("aac".into()),
+        };
+        assert_eq!(finalize_mode(mp4, &ok), FinalizeMode::RemuxCopy);
+
+        let bad_v = StreamCodecs {
+            video: Some("vp9".into()),
+            audio: Some("aac".into()),
+        };
+        assert_eq!(finalize_mode(mp4, &bad_v), FinalizeMode::FullEncode);
+
+        let bad_a = StreamCodecs {
+            video: Some("h264".into()),
+            audio: Some("opus".into()),
+        };
+        assert_eq!(finalize_mode(mp4, &bad_a), FinalizeMode::RecodeAudio);
+    }
+
+    #[test]
+    fn finalize_mode_webm_and_mkv() {
+        let webm = super::super::video_profile("webm").unwrap();
+        assert_eq!(
+            finalize_mode(
+                webm,
+                &StreamCodecs {
+                    video: Some("vp9".into()),
+                    audio: Some("opus".into()),
+                }
+            ),
+            FinalizeMode::RemuxCopy
+        );
+        let mkv = super::super::video_profile("mkv").unwrap();
+        assert_eq!(
+            finalize_mode(
+                mkv,
+                &StreamCodecs {
+                    video: Some("h264".into()),
+                    audio: Some("aac".into()),
+                }
+            ),
+            FinalizeMode::FullEncode
+        );
+        assert_eq!(
+            finalize_mode(
+                mkv,
+                &StreamCodecs {
+                    video: Some("av1".into()),
+                    audio: Some("opus".into()),
+                }
+            ),
+            FinalizeMode::RemuxCopy
+        );
     }
 
     #[test]

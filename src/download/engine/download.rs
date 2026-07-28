@@ -84,17 +84,12 @@ impl DownloadEngine {
         let source = video_source_path(&out);
         let source = self.ytdlp_download(url, &source, &opts, &on_progress).await?;
 
-        // Re-encode completo (libx264/av1/vp9): em máquina fraca leva minutos.
-        // Começa em 0% no estágio Transcoding e repassa o progresso real do ffmpeg.
-        on_progress(Progress {
-            fraction: 0.0,
-            stage: Stage::Transcoding,
-            ..Default::default()
-        });
+        // Preferência: remux rápido se codecs já batem; re-encode só se preciso.
+        // O estágio (Finalizing vs Transcoding) vem do finalize.
         let on_tc = |pr: Progress| {
             on_progress(Progress {
                 fraction: pr.fraction,
-                stage: Stage::Transcoding,
+                stage: pr.stage,
                 speed_bps: 0.0,
                 eta_secs: pr.eta_secs,
                 downloaded_bytes: 0,
@@ -310,7 +305,18 @@ impl DownloadEngine {
                     .arg("--convert-thumbnails")
                     .arg("jpg");
             } else {
-                let selector = "bv*+ba/b";
+                // Preferir codecs do perfil na origem: evita re-encode lento depois.
+                // mp4→H.264+AAC, webm→VP9+Opus, mkv→AV1 quando existir.
+                let selector = match opts.format.as_str() {
+                    "mp4" => {
+                        "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/bv*[vcodec^=avc]+ba[acodec^=mp4a]/b[ext=mp4]/bv*+ba/b"
+                    }
+                    "webm" => {
+                        "bv*[vcodec^=vp9]+ba[acodec^=opus]/bv*[vcodec^=vp09]+ba/b[ext=webm]/bv*+ba/b"
+                    }
+                    "mkv" => "bv*[vcodec^=av01]+ba/bv*[vcodec^=av1]+ba/bv*+ba/b",
+                    _ => "bv*+ba/b",
+                };
                 cmd.arg("-f")
                     .arg(selector)
                     .arg("--merge-output-format")
