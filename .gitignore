@@ -1,2 +1,4 @@
 /target
 /dist
+# Documento de trabalho das tasks do release — não é artefato do projeto.
+/Task.md

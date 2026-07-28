@@ -223,6 +223,8 @@ fn start_batch_convert(app: &mut App) {
                 let mut op = op_state.lock().unwrap();
                 op.phase =
                     DownloadPhase::Downloading(format!("Convertendo {}/{}...", i + 1, total));
+                // Fração global = (itens prontos + progresso do item atual) / total.
+                op.progress = Some(i as f32 / total as f32);
             }
             let folder = file.parent().map(|p| p.to_path_buf()).unwrap_or_default();
             let stem = file
@@ -230,6 +232,14 @@ fn start_batch_convert(app: &mut App) {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "saida".to_string());
             let out = folder.join(format!("{}.{}", stem, format));
+            let op_cb = op_state.clone();
+            let on_progress = move |pr: crate::download::engine::Progress| {
+                if let Ok(mut s) = op_cb.lock() {
+                    let base = i as f32 / total as f32;
+                    let step = (pr.fraction.clamp(0.0, 1.0) as f32) / total as f32;
+                    s.progress = Some((base + step).clamp(0.0, 1.0));
+                }
+            };
             match eng
                 .convert_file(
                     &file.to_string_lossy(),
@@ -237,6 +247,7 @@ fn start_batch_convert(app: &mut App) {
                     &format,
                     "",
                     convert_engine,
+                    on_progress,
                 )
                 .await
             {
@@ -856,81 +867,319 @@ fn watermark_flow(app: &mut App) {
     }));
 }
 
+/// Centraliza uma linha horizontal no card.
+/// `ui.horizontal` sozinho ocupa a largura toda e alinha à esquerda mesmo
+/// dentro de `vertical_centered` — medimos a largura do conteúdo no frame
+/// anterior e aplicamos padding simétrico.
+fn centered_h_row(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let id = ui.id().with(id_salt);
+    let content_w = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(id))
+        .unwrap_or(120.0);
+    ui.horizontal(|ui| {
+        let pad = ((ui.available_width() - content_w) * 0.5).max(0.0);
+        ui.add_space(pad);
+        let start_x = ui.cursor().left();
+        add_contents(ui);
+        let used = (ui.cursor().left() - start_x).max(1.0);
+        ui.ctx().data_mut(|d| d.insert_temp(id, used));
+    });
+}
+
 fn image_batch_card(app: &mut App, ui: &mut egui::Ui) {
     let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
-    let mut run = false;
+    let mut pick = false;
+    let mut convert = false;
+    let mut clear = false;
+    let mut pick_dir = false;
+    let mut remove_at: Option<usize> = None;
+    let mut cfg_dirty = false;
+
     theme::card_frame().show(ui, |ui| {
         ui.set_min_width(ui.available_width());
-        ui.label(
-            egui::RichText::new(if pt { "🖼 Imagens em lote" } else { "🖼 Batch images" })
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new(if pt {
+                    "🖼 Imagens em lote"
+                } else {
+                    "🖼 Batch images"
+                })
                 .color(theme::text())
                 .size(16.0)
                 .strong(),
-        );
-        ui.label(
-            egui::RichText::new(if pt {
-                "Converte/redimensiona/comprime várias imagens de uma vez (inclui HEIC)."
-            } else {
-                "Convert/resize/compress many images at once (HEIC included)."
-            })
-            .color(theme::text_muted())
-            .size(12.0),
-        );
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label(if pt { "Formato" } else { "Format" });
-            for f in ["jpg", "png", "webp"] {
-                let sel = app.config.image_format == f;
-                let fill = if sel { theme::accent() } else { theme::bg_card() };
-                if ui.add(egui::Button::new(f).fill(fill)).clicked() {
-                    app.config.image_format = f.to_string();
+            );
+            ui.label(
+                egui::RichText::new(if pt {
+                    "Converte/redimensiona/comprime várias imagens de uma vez (inclui HEIC)."
+                } else {
+                    "Convert/resize/compress many images at once (HEIC included)."
+                })
+                .color(theme::text_muted())
+                .size(12.0),
+            );
+            ui.add_space(8.0);
+
+            centered_h_row(ui, "img_batch_fmt", |ui| {
+                ui.label(if pt { "Formato" } else { "Format" });
+                for f in ["jpg", "png", "webp"] {
+                    let sel = app.config.image_format == f;
+                    let fill = if sel {
+                        theme::accent()
+                    } else {
+                        theme::bg_card()
+                    };
+                    if ui.add(egui::Button::new(f).fill(fill)).clicked() {
+                        app.config.image_format = f.to_string();
+                        cfg_dirty = true;
+                    }
                 }
+            });
+            ui.add_space(6.0);
+
+            // Presets de largura no lugar do slider 0..=3840.
+            centered_h_row(ui, "img_batch_w", |ui| {
+                ui.label(if pt { "Largura" } else { "Width" });
+                for (label, w) in [
+                    (if pt { "Original" } else { "Original" }, 0u32),
+                    ("720", 720),
+                    ("1080", 1080),
+                    ("1920", 1920),
+                    ("3840", 3840),
+                ] {
+                    let sel = app.config.image_max_width == w;
+                    let fill = if sel {
+                        theme::accent()
+                    } else {
+                        theme::bg_card()
+                    };
+                    if ui.add(egui::Button::new(label).fill(fill)).clicked() {
+                        app.config.image_max_width = w;
+                        cfg_dirty = true;
+                    }
+                }
+            });
+
+            // PNG é sem perdas: o slider de qualidade não tem efeito.
+            if app.config.image_format != "png" {
+                centered_h_row(ui, "img_batch_q", |ui| {
+                    ui.label(if pt { "Qualidade" } else { "Quality" });
+                    if ui
+                        .add_sized(
+                            egui::vec2(160.0, 18.0),
+                            egui::Slider::new(&mut app.config.image_quality, 10..=100),
+                        )
+                        .changed()
+                    {
+                        cfg_dirty = true;
+                    }
+                });
+            } else {
+                ui.label(
+                    egui::RichText::new(if pt {
+                        "PNG é sem perdas — qualidade não se aplica."
+                    } else {
+                        "PNG is lossless — quality does not apply."
+                    })
+                    .color(theme::text_faint())
+                    .size(11.0),
+                );
+            }
+
+            ui.add_space(8.0);
+            if ui
+                .add(theme::accent_button(if pt {
+                    "Selecionar imagens…"
+                } else {
+                    "Select images…"
+                }))
+                .clicked()
+            {
+                pick = true;
+            }
+
+            if !app.image_batch_files.is_empty() {
+                ui.add_space(8.0);
+                let n = app.image_batch_files.len();
+                ui.label(
+                    egui::RichText::new(if pt {
+                        format!("{} imagem(ns) selecionada(s)", n)
+                    } else {
+                        format!("{} image(s) selected", n)
+                    })
+                    .color(theme::text())
+                    .strong(),
+                );
+
+                // Pasta de destino visível e alterável.
+                let default_dir = app
+                    .image_batch_files
+                    .first()
+                    .and_then(|f| f.parent())
+                    .map(|p| p.join("imagens_convertidas"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("imagens_convertidas"));
+                if app.image_batch_out_dir.is_none() {
+                    app.image_batch_out_dir = Some(default_dir.clone());
+                }
+                let dir_txt = app
+                    .image_batch_out_dir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                centered_h_row(ui, "img_batch_dir", |ui| {
+                    ui.label(
+                        egui::RichText::new(if pt { "Destino:" } else { "Output:" })
+                            .color(theme::text_muted())
+                            .size(11.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(truncate_path(&dir_txt, 48))
+                            .color(theme::text())
+                            .size(11.0),
+                    );
+                    if ui
+                        .button(if pt {
+                            "Escolher pasta…"
+                        } else {
+                            "Choose folder…"
+                        })
+                        .clicked()
+                    {
+                        pick_dir = true;
+                    }
+                });
+
+                ui.add_space(4.0);
+                // Lista de arquivos: centraliza cada linha nome + ✕.
+                egui::ScrollArea::vertical()
+                    .max_height(120.0)
+                    .show(ui, |ui| {
+                        for (i, f) in app.image_batch_files.iter().enumerate() {
+                            let name = f
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| f.to_string_lossy().to_string());
+                            centered_h_row(ui, ("img_batch_file", i), |ui| {
+                                ui.label(
+                                    egui::RichText::new(name)
+                                        .color(theme::text())
+                                        .size(12.0),
+                                );
+                                if ui
+                                    .small_button("✕")
+                                    .on_hover_text(if pt {
+                                        "Remover"
+                                    } else {
+                                        "Remove"
+                                    })
+                                    .clicked()
+                                {
+                                    remove_at = Some(i);
+                                }
+                            });
+                        }
+                    });
+
+                ui.add_space(8.0);
+                let convert_label = if pt {
+                    format!("Converter {} imagens", n)
+                } else {
+                    format!("Convert {} images", n)
+                };
+                centered_h_row(ui, "img_batch_actions", |ui| {
+                    if ui.add(theme::accent_button(&convert_label)).clicked() {
+                        convert = true;
+                    }
+                    if ui.add(theme::ghost_button(s_cancel(pt))).clicked() {
+                        clear = true;
+                    }
+                });
             }
         });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label(if pt { "Largura máx (0 = original)" } else { "Max width (0 = original)" });
-            ui.add(egui::Slider::new(&mut app.config.image_max_width, 0..=3840));
-        });
-        ui.horizontal(|ui| {
-            ui.label(if pt { "Qualidade" } else { "Quality" });
-            ui.add(egui::Slider::new(&mut app.config.image_quality, 10..=100));
-        });
-        ui.add_space(8.0);
-        if ui
-            .add(theme::accent_button(if pt {
-                "Selecionar imagens e converter..."
-            } else {
-                "Select images & convert..."
-            }))
-            .clicked()
-        {
-            run = true;
-        }
     });
-    if run {
-        image_batch_flow(app);
+
+    if cfg_dirty {
+        app.config.save();
+    }
+    if pick {
+        if let Some(files) = rfd::FileDialog::new()
+            .add_filter(
+                "Imagens",
+                &["jpg", "jpeg", "png", "webp", "bmp", "tiff", "gif", "heic", "heif"],
+            )
+            .pick_files()
+        {
+            if !files.is_empty() {
+                if app.image_batch_out_dir.is_none() {
+                    app.image_batch_out_dir = files
+                        .first()
+                        .and_then(|f| f.parent())
+                        .map(|p| p.join("imagens_convertidas"));
+                }
+                app.image_batch_files = files;
+            }
+        }
+    }
+    if pick_dir {
+        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            app.image_batch_out_dir = Some(dir);
+        }
+    }
+    if let Some(i) = remove_at {
+        if i < app.image_batch_files.len() {
+            app.image_batch_files.remove(i);
+        }
+        if app.image_batch_files.is_empty() {
+            app.image_batch_out_dir = None;
+        }
+    }
+    if clear {
+        app.image_batch_files.clear();
+        app.image_batch_out_dir = None;
+    }
+    if convert {
+        image_batch_run(app);
     }
 }
 
-fn image_batch_flow(app: &mut App) {
-    let Some(files) = rfd::FileDialog::new()
-        .add_filter(
-            "Imagens",
-            &["jpg", "jpeg", "png", "webp", "bmp", "tiff", "gif", "heic", "heif"],
-        )
-        .pick_files()
-    else {
-        return;
-    };
-    if files.is_empty() {
+fn s_cancel(pt: bool) -> &'static str {
+    if pt {
+        "Cancelar"
+    } else {
+        "Cancel"
+    }
+}
+
+fn truncate_path(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let tail: String = s.chars().rev().take(max.saturating_sub(1)).collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("…{}", tail)
+}
+
+fn image_batch_run(app: &mut App) {
+    if app.image_batch_files.is_empty() {
         return;
     }
     app.config.save();
-    let out_dir = files
-        .first()
-        .and_then(|f| f.parent())
-        .map(|p| p.join("imagens_convertidas"))
+    let files = std::mem::take(&mut app.image_batch_files);
+    let out_dir = app
+        .image_batch_out_dir
+        .take()
+        .or_else(|| {
+            files
+                .first()
+                .and_then(|f| f.parent())
+                .map(|p| p.join("imagens_convertidas"))
+        })
         .unwrap_or_else(|| std::path::PathBuf::from("imagens_convertidas"));
     let engine = app.engine.clone();
     let op_state = app.operation.clone();
@@ -938,11 +1187,12 @@ fn image_batch_flow(app: &mut App) {
     let maxw = app.config.image_max_width;
     let quality = app.config.image_quality;
     let n = files.len();
+    let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
 
     {
         let mut op = op_state.lock().unwrap();
-        op.phase = DownloadPhase::Downloading(format!("Convertendo {} imagem(ns)...", n));
-        op.progress = None;
+        op.phase = DownloadPhase::Downloading(format!("Convertendo 0/{}...", n));
+        op.progress = Some(0.0);
     }
     app.download_task = Some(tokio::spawn(async move {
         let Some(eng) = engine else {
@@ -950,13 +1200,42 @@ fn image_batch_flow(app: &mut App) {
                 DownloadPhase::Failed("Engine não inicializado".to_string());
             return;
         };
+        let op_cb = op_state.clone();
+        let on_progress = move |done: usize, total: usize| {
+            if let Ok(mut s) = op_cb.lock() {
+                s.phase =
+                    DownloadPhase::Downloading(format!("Convertendo {}/{}...", done.min(total), total));
+                s.progress = if total == 0 {
+                    Some(0.0)
+                } else {
+                    Some((done as f32 / total as f32).clamp(0.0, 1.0))
+                };
+            }
+        };
         match eng
-            .batch_convert_images(files, out_dir.clone(), format, maxw, quality)
+            .batch_convert_images(files, out_dir.clone(), format, maxw, quality, on_progress)
             .await
         {
-            Ok(p) => {
-                op_state.lock().unwrap().phase =
-                    DownloadPhase::Completed(p.to_string_lossy().to_string());
+            Ok((p, failed)) => {
+                let ok = n.saturating_sub(failed.len());
+                let summary = crate::download::engine::image_batch_summary(ok, failed.len(), pt);
+                let mut op = op_state.lock().unwrap();
+                if failed.is_empty() {
+                    op.phase = DownloadPhase::Completed(format!(
+                        "{} — {}",
+                        p.to_string_lossy(),
+                        summary
+                    ));
+                } else if ok == 0 {
+                    op.phase = DownloadPhase::Failed(summary);
+                } else {
+                    // Sucesso parcial: mostra caminho + resumo honesto de falhas.
+                    op.phase = DownloadPhase::Completed(format!(
+                        "{} — {}",
+                        p.to_string_lossy(),
+                        summary
+                    ));
+                }
             }
             Err(e) => {
                 op_state.lock().unwrap().phase = DownloadPhase::Failed(e.to_string());

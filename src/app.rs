@@ -41,6 +41,9 @@ pub struct App {
     clip_last_check: std::time::Instant,
     pub batch_convert: Vec<std::path::PathBuf>,
     pub batch_convert_format: String,
+    /// Seleção da card "Imagens em lote" (revisão antes de converter).
+    pub image_batch_files: Vec<std::path::PathBuf>,
+    pub image_batch_out_dir: Option<std::path::PathBuf>,
     pub toasts: Vec<Toast>,
     last_signaled: Option<String>,
     pub toast_queue: Arc<Mutex<Vec<(String, bool)>>>,
@@ -224,6 +227,8 @@ pub struct DownloadOperation {
     pub live_from_start: bool,
     pub is_live: bool,
     pub live_bytes: u64,
+    /// Estágio honesto (download / pós-processamento / transcode).
+    pub stage: crate::download::engine::Stage,
 }
 
 #[derive(Clone, PartialEq)]
@@ -291,6 +296,7 @@ impl App {
             live_from_start: false,
             is_live: false,
             live_bytes: 0,
+            stage: crate::download::engine::Stage::Downloading,
         }));
 
         let batch_format = config.video_format.clone();
@@ -324,6 +330,8 @@ impl App {
             clip_last_check: std::time::Instant::now(),
             batch_convert: Vec::new(),
             batch_convert_format: String::new(),
+            image_batch_files: Vec::new(),
+            image_batch_out_dir: None,
             toasts: Vec::new(),
             last_signaled: None,
             toast_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1031,11 +1039,14 @@ impl App {
         if url.is_empty() {
             return;
         }
+        let s = crate::ui::i18n::s(self.config.lang);
         if !crate::download::engine::looks_like_url(&url) {
             let mut op = self.operation.lock().unwrap();
-            op.phase = DownloadPhase::Failed(
-                "URL inválida. Cole um link válido (ex.: https://...)".to_string(),
-            );
+            op.phase = DownloadPhase::Failed(if self.config.lang == crate::ui::i18n::Lang::Pt {
+                "URL inválida. Cole um link válido (ex.: https://...)".to_string()
+            } else {
+                "Invalid URL. Paste a valid link (e.g. https://...)".to_string()
+            });
             return;
         }
 
@@ -1064,6 +1075,7 @@ impl App {
         let engine = self.engine.clone();
         let template = self.config.filename_template.clone();
         let smart = self.config.smart_rename;
+        let err_engine = s.err_engine.to_string();
         self.download_task = Some(tokio::spawn(async move {
             match engine {
                 Some(ref eng) => {
@@ -1099,7 +1111,7 @@ impl App {
                 }
                 None => {
                     let mut op = op_ref.lock().unwrap();
-                    op.phase = DownloadPhase::Failed("Engine não inicializado".to_string());
+                    op.phase = DownloadPhase::Failed(err_engine);
                 }
             }
         }));
@@ -1171,11 +1183,12 @@ impl App {
         }
         let engine = self.engine.clone();
         let insp = self.inspector.clone();
+        let err_engine = crate::ui::i18n::s(self.config.lang).err_engine.to_string();
         tokio::spawn(async move {
             let Some(eng) = engine else {
                 let mut i = insp.lock().unwrap();
                 i.loading = false;
-                i.error = Some("Engine não inicializado".to_string());
+                i.error = Some(err_engine);
                 return;
             };
             match eng.list_formats(&url).await {
@@ -1203,19 +1216,25 @@ impl App {
                 DownloadPhase::Failed("URL inválida.".to_string());
             return;
         }
+        let s = crate::ui::i18n::s(self.config.lang);
         {
             let mut op = self.operation.lock().unwrap();
-            op.phase = DownloadPhase::Downloading("Baixando miniatura...".to_string());
+            op.phase = DownloadPhase::Downloading(if self.config.lang == crate::ui::i18n::Lang::Pt {
+                "Baixando miniatura...".to_string()
+            } else {
+                "Downloading thumbnail...".to_string()
+            });
             op.progress = None;
             op.preview = None;
         }
         let op_ref = self.operation.clone();
         let engine = self.engine.clone();
         let folder = self.config.default_download_dir.clone();
+        let err_engine = s.err_engine.to_string();
         self.download_task = Some(tokio::spawn(async move {
             let Some(eng) = engine else {
                 op_ref.lock().unwrap().phase =
-                    DownloadPhase::Failed("Engine não inicializado".to_string());
+                    DownloadPhase::Failed(err_engine);
                 return;
             };
             match eng.download_thumbnail_file(&url, &folder).await {
@@ -1274,12 +1293,13 @@ impl App {
             "video"
         };
 
+        let err_engine = crate::ui::i18n::s(self.config.lang).err_engine.to_string();
         self.download_task = Some(tokio::spawn(async move {
             let eng = match engine {
                 Some(e) => e,
                 None => {
                     op_ref.lock().unwrap().phase =
-                        DownloadPhase::Failed("Engine não inicializado".to_string());
+                        DownloadPhase::Failed(err_engine);
                     return;
                 }
             };
@@ -1407,6 +1427,7 @@ impl App {
 
     fn render_loading(&self, ctx: &egui::Context) {
         use crate::ui::theme;
+        let s = crate::ui::i18n::s(self.config.lang);
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::bg_app()))
             .show(ctx, |ui: &mut egui::Ui| {
@@ -1420,12 +1441,12 @@ impl App {
                     );
                     ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new("Inicializando o motor de download")
+                        egui::RichText::new(s.loading_engine)
                             .size(15.0)
                             .color(theme::text()),
                     );
                     ui.label(
-                        egui::RichText::new("Preparando yt-dlp + ffmpeg (apenas na primeira vez)")
+                        egui::RichText::new(s.loading_engine_sub)
                             .size(13.0)
                             .color(theme::text_muted()),
                     );
@@ -1513,6 +1534,7 @@ impl App {
                 db_path,
                 subs,
                 self.config.notify_on_complete,
+                crate::ui::i18n::s(self.config.lang).notify_dl_done.to_string(),
                 rate,
                 self.config.concurrent_fragments,
                 self.config.organize_by.clone(),

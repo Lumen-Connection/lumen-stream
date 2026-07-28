@@ -5,7 +5,16 @@ pub fn is_valid_url(url: &str) -> bool {
 
 pub fn looks_like_url(url: &str) -> bool {
     let u = url.trim();
-    !u.is_empty() && !u.contains(char::is_whitespace) && u.contains('.')
+    if u.is_empty() {
+        return false;
+    }
+    // ytsearch1:Artista - Faixa tem espaços: o resolve do Spotify devolve
+    // esse esquema e o download precisa aceitar (senão faixa única e playlist
+    // falham com "URL inválida").
+    if u.to_ascii_lowercase().starts_with("ytsearch") && u.contains(':') {
+        return true;
+    }
+    !u.contains(char::is_whitespace) && u.contains('.')
 }
 
 pub fn friendly_error(stderr: &str) -> String {
@@ -18,6 +27,11 @@ pub fn friendly_error(stderr: &str) -> String {
         Some("Vídeo indisponível.")
     } else if low.contains("requested format is not available") {
         Some("Formato/resolução indisponível para este vídeo.")
+    } else if (low.contains("unsupported url") || low.contains("do not open an issue") || low.contains("is not a valid url"))
+        && (low.contains("spotify") || stderr.contains("spotify.com") || stderr.contains("open.spotify"))
+    {
+        // Spotify é DRM: o app resolve metadados e busca no YouTube.
+        Some("Link do Spotify: use a Fila com a playlist/faixa — o áudio é buscado no YouTube.")
     } else if low.contains("unsupported url") || low.contains("is not a valid url") {
         Some("Link não suportado.")
     } else if low.contains("http error 403") || low.contains("403 forbidden") {
@@ -151,6 +165,33 @@ pub(super) fn ytdlp_error(stderr: &[u8]) -> String {
     format!("yt-dlp: {}", last)
 }
 
+/// Detecta o estágio a partir de uma linha do yt-dlp.
+/// Retorna `None` para linhas que não mudam o estágio corrente (desconhecidas
+/// ou de progresso de download sem troca de fase).
+pub(super) fn stage_from_ytdlp_line(line: &str) -> Option<super::models::Stage> {
+    use super::models::Stage;
+    let l = strip_format_index(line);
+    // Prefixos de pós-processamento do yt-dlp: merge, extração de áudio,
+    // thumbnail, conversão de vídeo e fixup de HLS.
+    const POST: &[&str] = &[
+        "[Merger]",
+        "[ExtractAudio]",
+        "[EmbedThumbnail]",
+        "[VideoConvertor]",
+        "[FixupM3u8]",
+        "[EmbedSubtitle]",
+        "[Metadata]",
+        "[MoveFiles]",
+    ];
+    if POST.iter().any(|p| l.starts_with(p)) {
+        return Some(Stage::PostProcessing);
+    }
+    if l.starts_with("[download]") {
+        return Some(Stage::Downloading);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +210,18 @@ mod tests {
         assert!(!looks_like_url("apenas texto com espaço.com"));
         assert!(!looks_like_url("semponto"));
         assert!(!looks_like_url(""));
+        // Spotify resolve → ytsearch1:Artista - Faixa (com espaços).
+        assert!(looks_like_url("ytsearch1:Artista - Faixa"));
+        assert!(looks_like_url("ytsearch1:onlyoneword"));
+    }
+
+    #[test]
+    fn friendly_error_spotify_is_actionable() {
+        let msg = friendly_error(
+            "ERROR: [spotify] open.spotify.com/playlist/x: Please DO NOT open an issue, unless… Unsupported URL",
+        );
+        assert!(msg.to_lowercase().contains("spotify"), "{msg}");
+        assert!(!msg.contains("DO NOT open"), "{msg}");
     }
 
     #[test]
@@ -262,5 +315,51 @@ mod tests {
     fn ytdlp_error_uses_last_nonempty_line() {
         assert_eq!(ytdlp_error(b"aviso\nerro fatal\n\n"), "yt-dlp: erro fatal");
         assert_eq!(ytdlp_error(b""), "yt-dlp: erro desconhecido");
+    }
+
+    #[test]
+    fn stage_from_merger_is_post_processing() {
+        use super::super::models::Stage;
+        assert_eq!(
+            stage_from_ytdlp_line("[Merger] Merging formats into \"x.mkv\""),
+            Some(Stage::PostProcessing)
+        );
+        assert_eq!(
+            stage_from_ytdlp_line("[ExtractAudio] Destination: a.mp3"),
+            Some(Stage::PostProcessing)
+        );
+        assert_eq!(
+            stage_from_ytdlp_line("[EmbedThumbnail] ffmpeg: Adding thumbnail"),
+            Some(Stage::PostProcessing)
+        );
+        assert_eq!(
+            stage_from_ytdlp_line("[VideoConvertor] Converting video"),
+            Some(Stage::PostProcessing)
+        );
+        assert_eq!(
+            stage_from_ytdlp_line("[FixupM3u8] Fixing MPEG-TS"),
+            Some(Stage::PostProcessing)
+        );
+    }
+
+    #[test]
+    fn stage_from_download_line_is_downloading() {
+        use super::super::models::Stage;
+        assert_eq!(
+            stage_from_ytdlp_line("[download] 45% of 10MiB at 1MiB/s ETA 00:10"),
+            Some(Stage::Downloading)
+        );
+        // Prefixo de índice de formato (download paralelo).
+        assert_eq!(
+            stage_from_ytdlp_line("1: [download] 10% of 1MiB"),
+            Some(Stage::Downloading)
+        );
+    }
+
+    #[test]
+    fn stage_from_unknown_line_does_not_change() {
+        assert_eq!(stage_from_ytdlp_line("[youtube] Extracting URL"), None);
+        assert_eq!(stage_from_ytdlp_line("WARNING: something"), None);
+        assert_eq!(stage_from_ytdlp_line(""), None);
     }
 }

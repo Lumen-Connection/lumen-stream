@@ -17,7 +17,8 @@ impl DownloadEngine {
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         // TXT é sempre extração nativa (rápida e sem dependência).
         // Para PDF, respeita a escolha do usuário; Auto pega o melhor disponível.
-        let chosen = if format == "txt" {
+        // md e txt são sempre nativos: LibreOffice/MS Office não agregam valor.
+        let chosen = if format == "txt" || format == "md" {
             ConvertEngine::Rust
         } else {
             match engine {
@@ -52,9 +53,13 @@ impl DownloadEngine {
             let text = office_extract_text(&input)?;
             match format.as_str() {
                 "txt" => std::fs::write(&out_path, text).map_err(|e| e.to_string()),
+                "md" => {
+                    let md = super::markdown::document_to_markdown(&input)?;
+                    std::fs::write(&out_path, md).map_err(|e| e.to_string())
+                }
                 "pdf" => render_text_pdf(&text, &out_path, &title),
                 other => Err(format!(
-                    "Conversão nativa para \"{}\" não suportada. Use PDF ou TXT.",
+                    "Conversão nativa para \"{}\" não suportada. Use PDF, TXT ou MD.",
                     other
                 )),
             }
@@ -256,7 +261,7 @@ fn msoffice_to_pdf(input: &Path, out: &Path) -> Result<(), String> {
     ))
 }
 
-fn office_extract_text(path: &Path) -> Result<String, String> {
+pub(super) fn office_extract_text(path: &Path) -> Result<String, String> {
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -294,7 +299,7 @@ fn office_extract_text(path: &Path) -> Result<String, String> {
     }
 }
 
-fn read_zip_entry(path: &Path, name: &str) -> Result<String, String> {
+pub(super) fn read_zip_entry(path: &Path, name: &str) -> Result<String, String> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -306,7 +311,7 @@ fn read_zip_entry(path: &Path, name: &str) -> Result<String, String> {
     Ok(buf)
 }
 
-fn read_zip_entries(path: &Path, prefix: &str, suffix: &str) -> Result<String, String> {
+pub(super) fn read_zip_entries(path: &Path, prefix: &str, suffix: &str) -> Result<String, String> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -328,7 +333,7 @@ fn read_zip_entries(path: &Path, prefix: &str, suffix: &str) -> Result<String, S
     Ok(out)
 }
 
-fn read_zip_entries_by_suffix(path: &Path, suffixes: &[&str]) -> Result<String, String> {
+pub(super) fn read_zip_entries_by_suffix(path: &Path, suffixes: &[&str]) -> Result<String, String> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -350,7 +355,7 @@ fn read_zip_entries_by_suffix(path: &Path, suffixes: &[&str]) -> Result<String, 
     Ok(out)
 }
 
-fn spreadsheet_to_text(path: &Path) -> Result<String, String> {
+pub(super) fn spreadsheet_to_text(path: &Path) -> Result<String, String> {
     use calamine::{open_workbook_auto, Data, Reader};
     let mut wb = open_workbook_auto(path).map_err(|e| e.to_string())?;
     let names: Vec<String> = wb.sheet_names().to_vec();
@@ -426,7 +431,7 @@ fn strip_markup(html: &str) -> String {
     out
 }
 
-fn strip_tags(s: &str) -> String {
+pub(super) fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_tag = false;
     for c in s.chars() {
@@ -440,7 +445,7 @@ fn strip_tags(s: &str) -> String {
     out
 }
 
-fn unescape_entities(s: &str) -> String {
+pub(super) fn unescape_entities(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
