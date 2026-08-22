@@ -17,6 +17,36 @@ pub fn looks_like_url(url: &str) -> bool {
     !u.contains(char::is_whitespace) && u.contains('.')
 }
 
+/// YouTube (e o esquema `ytsearch` do próprio yt-dlp). Usado para o fallback
+/// de `player_client` após um 403 — não deve disparar em Vimeo/outros.
+pub fn is_youtube_url(url: &str) -> bool {
+    let u = url.trim();
+    if u.is_empty() {
+        return false;
+    }
+    let low = u.to_ascii_lowercase();
+    if low.starts_with("ytsearch") && low.contains(':') {
+        return true;
+    }
+    let rest = low
+        .strip_prefix("https://")
+        .or_else(|| low.strip_prefix("http://"))
+        .unwrap_or(low.as_str());
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    host == "youtube.com"
+        || host == "youtu.be"
+        || host == "m.youtube.com"
+        || host == "music.youtube.com"
+        || host.ends_with(".youtube.com")
+}
+
+/// Detecta HTTP 403 no stderr do yt-dlp (case-insensitive).
+pub fn is_http_403(stderr: &str) -> bool {
+    let low = stderr.to_lowercase();
+    low.contains("http error 403") || low.contains("403 forbidden")
+}
+
 pub fn friendly_error(stderr: &str) -> String {
     let low = stderr.to_lowercase();
     let known = if low.contains("private video") || low.contains("sign in to confirm") {
@@ -34,8 +64,8 @@ pub fn friendly_error(stderr: &str) -> String {
         Some("Link do Spotify: use a Fila com a playlist/faixa — o áudio é buscado no YouTube.")
     } else if low.contains("unsupported url") || low.contains("is not a valid url") {
         Some("Link não suportado.")
-    } else if low.contains("http error 403") || low.contains("403 forbidden") {
-        Some("Acesso negado (403). Tente atualizar o yt-dlp em Configurações.")
+    } else if is_http_403(stderr) {
+        Some("Acesso negado (403). O yt-dlp foi atualizado automaticamente — tente o download novamente. Se persistir, aguarde alguns minutos.")
     } else if low.contains("http error 404") {
         Some("Conteúdo não encontrado (404).")
     } else if low.contains("getaddrinfo")
@@ -216,6 +246,34 @@ mod tests {
     }
 
     #[test]
+    fn is_http_403_detects_known_patterns() {
+        assert!(is_http_403("ERROR: HTTP Error 403: Forbidden"));
+        assert!(is_http_403("http error 403: Forbidden"));
+        assert!(is_http_403("unable to download video data: HTTP Error 403"));
+        assert!(is_http_403("403 Forbidden"));
+        assert!(is_http_403("got 403 forbidden from youtube"));
+        assert!(!is_http_403("HTTP Error 404: Not Found"));
+        assert!(!is_http_403("HTTP Error 500: Internal Server Error"));
+        assert!(!is_http_403("video unavailable"));
+        assert!(!is_http_403(""));
+    }
+
+    #[test]
+    fn is_youtube_url_matches_hosts_and_ytsearch() {
+        assert!(is_youtube_url("https://youtube.com/watch?v=x"));
+        assert!(is_youtube_url("https://www.youtube.com/watch?v=x"));
+        assert!(is_youtube_url("https://youtu.be/7WwPkAa9kZQ"));
+        assert!(is_youtube_url("https://m.youtube.com/watch?v=x"));
+        assert!(is_youtube_url("https://music.youtube.com/watch?v=x"));
+        assert!(is_youtube_url("ytsearch1:Artista - Faixa"));
+        assert!(is_youtube_url("youtube.com/watch?v=x"));
+        assert!(!is_youtube_url("https://vimeo.com/123"));
+        assert!(!is_youtube_url("https://example.com/youtube.com"));
+        assert!(!is_youtube_url("https://notyoutube.com/watch"));
+        assert!(!is_youtube_url(""));
+    }
+
+    #[test]
     fn friendly_error_spotify_is_actionable() {
         let msg = friendly_error(
             "ERROR: [spotify] open.spotify.com/playlist/x: Please DO NOT open an issue, unless… Unsupported URL",
@@ -235,6 +293,10 @@ mod tests {
             "Vídeo privado ou que exige login."
         );
         assert_eq!(friendly_error("Video unavailable"), "Vídeo indisponível.");
+        assert_eq!(
+            friendly_error("HTTP Error 403: Forbidden"),
+            "Acesso negado (403). O yt-dlp foi atualizado automaticamente — tente o download novamente. Se persistir, aguarde alguns minutos."
+        );
         assert_eq!(
             friendly_error("HTTP Error 404: Not Found"),
             "Conteúdo não encontrado (404)."

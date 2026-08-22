@@ -29,7 +29,7 @@ pub use models::{
 };
 pub use office::engine_status;
 pub use text_utils::{apply_template, sanitize_filename, smart_clean_name};
-pub use ytdlp_util::{friendly_error, is_valid_url, looks_like_url};
+pub use ytdlp_util::{friendly_error, is_http_403, is_valid_url, is_youtube_url, looks_like_url};
 
 use self::fs_utils::binary_path;
 use self::whisper::find_whisper_exe;

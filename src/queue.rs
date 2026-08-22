@@ -423,7 +423,9 @@ fn set_status(jobs: &Jobs, id: u64, status: JobStatus) {
 
 fn is_network_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
-    m.contains("network")
+    crate::download::engine::is_http_403(msg)
+        || m.contains("acesso negado (403)")
+        || m.contains("network")
         || m.contains("timed out")
         || m.contains("timeout")
         || m.contains("connection")
@@ -707,6 +709,8 @@ mod tests {
             "getaddrinfo failed",
             "HTTP Error 503",
             "unable to download video data",
+            "HTTP Error 403: Forbidden",
+            "Acesso negado (403). O yt-dlp foi atualizado automaticamente — tente o download novamente. Se persistir, aguarde alguns minutos.",
         ] {
             assert!(is_network_error(msg), "{msg} deveria ser erro de rede");
         }
