@@ -101,6 +101,29 @@ fn card_accessibility(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
                 .strong(),
         );
         ui.add_space(8.0);
+        let mut auto = app.config.auto_ui_scale;
+        if ui
+            .checkbox(
+                &mut auto,
+                if pt {
+                    "Escala automática (conforme o monitor)"
+                } else {
+                    "Automatic scale (based on monitor)"
+                },
+            )
+            .changed()
+        {
+            app.config.auto_ui_scale = auto;
+            if auto {
+                if let Some(h) = ui.ctx().input(|i| i.viewport().monitor_size.map(|s| s.y)) {
+                    app.config.ui_scale = crate::config::settings::auto_scale_for_monitor(h);
+                    ui.ctx()
+                        .set_pixels_per_point(app.config.ui_scale.clamp(0.7, 2.0));
+                }
+            }
+            *changed = true;
+        }
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(if pt { "Escala da interface" } else { "UI scale" });
             let mut scale_pct = (app.config.ui_scale * 100.0).round();
@@ -114,6 +137,7 @@ fn card_accessibility(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
             {
                 let scale = scale_pct / 100.0;
                 app.config.ui_scale = scale;
+                app.config.auto_ui_scale = false;
                 ui.ctx().set_pixels_per_point(scale);
                 *changed = true;
             }

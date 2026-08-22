@@ -40,15 +40,17 @@ fn main() -> eframe::Result<()> {
 }
 
 fn load_window_icon() -> Option<egui::IconData> {
-    // Com fundo: tile de ícone da janela/barra de tarefas.
-    let bytes = include_bytes!("../assets/LogoOficialLumenStream2.png");
+    // Logo transparente: a arte (losango 1968×2112) vai até as bordas, então
+    // quadrar com padding em vez de crop — o crop cortaria as pontas.
+    let bytes = include_bytes!("../assets/LogoOficialLumenStreamTransparente2.png");
     let rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = rgba.dimensions();
-    let side = w.min(h);
-    let cx = (w - side) / 2;
-    let cy = (h - side) / 2;
-    let cropped = image::imageops::crop_imm(&rgba, cx, cy, side, side).to_image();
-    let icon = image::DynamicImage::ImageRgba8(cropped)
+    let side = w.max(h);
+    let mut square = image::RgbaImage::new(side, side);
+    let ox = (side - w) / 2;
+    let oy = (side - h) / 2;
+    image::imageops::replace(&mut square, &rgba, ox as i64, oy as i64);
+    let icon = image::DynamicImage::ImageRgba8(square)
         .thumbnail(256, 256)
         .to_rgba8();
     let (iw, ih) = icon.dimensions();

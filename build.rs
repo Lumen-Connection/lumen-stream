@@ -3,6 +3,7 @@ fn main() {
     {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/LumenStreamIcon.ico");
-        let _ = res.compile();
+        res.compile()
+            .expect("falha ao embutir o ícone no exe (assets/LumenStreamIcon.ico)");
     }
 }

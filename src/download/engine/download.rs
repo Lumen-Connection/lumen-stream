@@ -9,10 +9,21 @@ use super::fs_utils::{
 use super::models::{format_duration, DownloadOptions, FormatRow, Progress, Stage, VideoPreview};
 use super::net::download_thumbnail;
 use super::ytdlp_util::{
-    friendly_error, looks_like_url, parse_ytdlp_eta, parse_ytdlp_percent,
-    parse_ytdlp_size, parse_ytdlp_speed, stage_from_ytdlp_line, ytdlp_error,
+    friendly_error, is_http_403, is_youtube_url, looks_like_url, parse_ytdlp_eta,
+    parse_ytdlp_percent, parse_ytdlp_size, parse_ytdlp_speed, stage_from_ytdlp_line,
+    ytdlp_error,
 };
 use super::{kill_tree, wait_for_stop, DownloadEngine};
+
+/// Fallback SABR/PO-token: o client padrão do YouTube devolve 403; android/tv
+/// costumam passar. Só entra nas tentativas seguintes a um 403.
+const YOUTUBE_PLAYER_CLIENT_FALLBACK: &str = "youtube:player_client=default,android,tv";
+
+fn apply_youtube_player_fallback(cmd: &mut tokio::process::Command, url: &str) {
+    if is_youtube_url(url) {
+        cmd.arg("--extractor-args").arg(YOUTUBE_PLAYER_CLIENT_FALLBACK);
+    }
+}
 
 impl DownloadEngine {
     pub async fn resolve_source(&self, url: &str) -> String {
@@ -116,21 +127,57 @@ impl DownloadEngine {
         binary_path(&self.libs_dir, "yt-dlp")
     }
 
-    async fn ytdlp_title(&self, url: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let mut cmd = tokio::process::Command::new(self.ytdlp_path());
-        cmd.arg("--no-warnings")
-            .arg("--skip-download")
-            .arg("--no-playlist")
-            .arg("--print")
-            .arg("%(title)s")
-            .arg(url);
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
+    /// Roda um comando de metadados do yt-dlp. Num 403, faz um retry único com
+    /// `player_client` alternativo (YouTube) e devolve `friendly_error` em vez
+    /// do stderr cru.
+    async fn ytdlp_metadata(
+        &self,
+        url: &str,
+        args: &[&str],
+    ) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        let run = |fallback: bool| {
+            let mut cmd = tokio::process::Command::new(self.ytdlp_path());
+            cmd.args(args);
+            if fallback {
+                apply_youtube_player_fallback(&mut cmd, url);
+            }
+            cmd.arg(url);
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000);
+            cmd
+        };
 
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            return Err(ytdlp_error(&output.stderr).into());
+        let output = run(false).output().await?;
+        if output.status.success() {
+            return Ok(output);
         }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_http_403(&stderr) {
+            if is_youtube_url(url) {
+                let retry = run(true).output().await?;
+                if retry.status.success() {
+                    return Ok(retry);
+                }
+                return Err(friendly_error(&String::from_utf8_lossy(&retry.stderr)).into());
+            }
+            return Err(friendly_error(&stderr).into());
+        }
+        Err(ytdlp_error(&output.stderr).into())
+    }
+
+    async fn ytdlp_title(&self, url: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let output = self
+            .ytdlp_metadata(
+                url,
+                &[
+                    "--no-warnings",
+                    "--skip-download",
+                    "--no-playlist",
+                    "--print",
+                    "%(title)s",
+                ],
+            )
+            .await?;
         let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if title.is_empty() {
             Ok("download".to_string())
@@ -140,19 +187,17 @@ impl DownloadEngine {
     }
 
     async fn ytdlp_preview(&self, url: &str) -> Result<VideoPreview, Box<dyn std::error::Error>> {
-        let mut cmd = tokio::process::Command::new(self.ytdlp_path());
-        cmd.arg("--no-warnings")
-            .arg("--skip-download")
-            .arg("--no-playlist")
-            .arg("--dump-single-json")
-            .arg(url);
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
-
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            return Err(ytdlp_error(&output.stderr).into());
-        }
+        let output = self
+            .ytdlp_metadata(
+                url,
+                &[
+                    "--no-warnings",
+                    "--skip-download",
+                    "--no-playlist",
+                    "--dump-single-json",
+                ],
+            )
+            .await?;
 
         let json: YtJson = serde_json::from_slice(&output.stdout)?;
 
@@ -244,8 +289,14 @@ impl DownloadEngine {
         const STALL_MIN_GROWTH: u64 = 256 * 1024;
         let mut last_err = String::new();
         let mut last_stalled = false;
+        // 403 (SABR/PO-token) ganha uma tentativa extra + update do yt-dlp
+        // (fora do gate semanal) e fallback de player_client no YouTube.
+        let mut max_attempts = MAX_ATTEMPTS;
+        let mut updated_for_403 = false;
+        let mut use_player_client_fallback = false;
 
-        for attempt in 0..MAX_ATTEMPTS {
+        let mut attempt = 0u32;
+        while attempt < max_attempts {
             let mut cmd = tokio::process::Command::new(self.ytdlp_path());
             cmd.arg("--no-warnings")
                 .arg("--no-playlist")
@@ -350,6 +401,9 @@ impl DownloadEngine {
                         }
                     }
                 }
+            }
+            if use_player_client_fallback {
+                apply_youtube_player_fallback(&mut cmd, url);
             }
             cmd.arg(url);
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -569,9 +623,27 @@ impl DownloadEngine {
                 }
             }
 
-            if attempt + 1 < MAX_ATTEMPTS {
+            if is_http_403(&last_err) {
+                if !updated_for_403 {
+                    updated_for_403 = true;
+                    crate::applog::info("yt-dlp: atualização disparada por erro 403");
+                    match self.update_ytdlp().await {
+                        Ok(_) => crate::applog::info("yt-dlp atualizado após 403"),
+                        Err(e) => crate::applog::error(&format!(
+                            "falha ao atualizar yt-dlp após 403: {e}"
+                        )),
+                    }
+                }
+                use_player_client_fallback = true;
+                if max_attempts == MAX_ATTEMPTS {
+                    max_attempts = MAX_ATTEMPTS + 1;
+                }
+            }
+
+            if attempt + 1 < max_attempts {
                 tokio::time::sleep(Duration::from_secs(2 * (attempt as u64 + 1))).await;
             }
+            attempt += 1;
         }
 
         cleanup_partials(&folder, &stem);
