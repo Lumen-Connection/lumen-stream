@@ -67,6 +67,8 @@ pub struct Config {
     pub history_grid: bool,
     #[serde(default = "default_scale")]
     pub ui_scale: f32,
+    #[serde(default = "default_auto_ui_scale")]
+    pub auto_ui_scale: bool,
     #[serde(default)]
     pub high_contrast: bool,
     #[serde(default)]
@@ -136,6 +138,91 @@ fn default_scale() -> f32 {
     1.0
 }
 
+fn default_auto_ui_scale() -> bool {
+    true
+}
+
+/// Escala da UI a partir da altura do monitor em pontos (já dividida pelo
+/// scale factor do SO). Âncoras: 720p→0.9, 1080p→1.0, 1440p→1.25, 4K→1.6.
+/// Interpolação linear entre elas; clamp final 0.7..=2.0.
+pub fn auto_scale_for_monitor(monitor_h_points: f32) -> f32 {
+    const ANCHORS: [(f32, f32); 4] = [
+        (720.0, 0.9),
+        (1080.0, 1.0),
+        (1440.0, 1.25),
+        (2160.0, 1.6),
+    ];
+    let raw = if monitor_h_points <= ANCHORS[0].0 {
+        // Abaixo de 720p: 240p → 0.7, 720p → 0.9.
+        let t = (monitor_h_points - 240.0) / (720.0 - 240.0);
+        0.7 + t * 0.2
+    } else {
+        let mut i = 0;
+        while i + 1 < ANCHORS.len() && monitor_h_points > ANCHORS[i + 1].0 {
+            i += 1;
+        }
+        if i + 1 < ANCHORS.len() {
+            let (x0, y0) = ANCHORS[i];
+            let (x1, y1) = ANCHORS[i + 1];
+            let t = (monitor_h_points - x0) / (x1 - x0);
+            y0 + t * (y1 - y0)
+        } else {
+            let (x0, y0) = ANCHORS[ANCHORS.len() - 2];
+            let (x1, y1) = ANCHORS[ANCHORS.len() - 1];
+            let t = (monitor_h_points - x0) / (x1 - x0);
+            y0 + t * (y1 - y0)
+        }
+    };
+    raw.clamp(0.7, 2.0)
+}
+
+/// Ajusta a janela salva à área do monitor: encolhe para ≤85% se passar do
+/// monitor; amplia proporcionalmente se ficou <45% da largura (caso típico
+/// de abrir numa TV 4K); respeita o mínimo 700×450 quando o monitor comporta.
+pub fn fit_window_to_monitor(win_w: f32, win_h: f32, mon_w: f32, mon_h: f32) -> (f32, f32) {
+    const MIN_W: f32 = 700.0;
+    const MIN_H: f32 = 450.0;
+    const MAX_FRAC: f32 = 0.85;
+    const MIN_WIDTH_FRAC: f32 = 0.45;
+
+    if mon_w <= 1.0 || mon_h <= 1.0 {
+        return (win_w, win_h);
+    }
+
+    let max_w = mon_w * MAX_FRAC;
+    let max_h = mon_h * MAX_FRAC;
+    let too_big = win_w > max_w || win_h > max_h;
+    let too_small = win_w < mon_w * MIN_WIDTH_FRAC;
+    let below_min = win_w < MIN_W.min(max_w) || win_h < MIN_H.min(max_h);
+    if !too_big && !too_small && !below_min {
+        return (win_w, win_h);
+    }
+
+    let mut w = win_w;
+    let mut h = win_h;
+
+    if too_big {
+        let scale = (max_w / w).min(max_h / h).min(1.0);
+        w *= scale;
+        h *= scale;
+    }
+
+    if w < mon_w * MIN_WIDTH_FRAC {
+        let scale = (mon_w * MIN_WIDTH_FRAC) / w;
+        w *= scale;
+        h *= scale;
+        if w > max_w || h > max_h {
+            let scale = (max_w / w).min(max_h / h);
+            w *= scale;
+            h *= scale;
+        }
+    }
+
+    w = w.max(MIN_W.min(max_w));
+    h = h.max(MIN_H.min(max_h));
+    (w, h)
+}
+
 fn default_organize() -> String {
     "none".to_string()
 }
@@ -183,6 +270,7 @@ impl Default for Config {
             copy_to_cloud: false,
             history_grid: false,
             ui_scale: 1.0,
+            auto_ui_scale: true,
             high_contrast: false,
             compact_ui: false,
             transcribe_translate: false,
@@ -260,6 +348,7 @@ mod tests {
         assert_eq!(c.watermark_pos, "br");
         assert_eq!(c.watermark_scale, 100);
         assert_eq!(c.ui_scale, 1.0);
+        assert!(c.auto_ui_scale);
         assert_eq!((c.win_w, c.win_h), (960.0, 640.0));
         assert!(c.notify_on_complete && c.smart_rename && c.auto_retry);
         assert!(!c.subtitles && !c.high_contrast && !c.onboarded);
@@ -289,6 +378,7 @@ mod tests {
         assert_eq!(c.sub_langs, "pt,en");
         assert_eq!(c.concurrent_fragments, 4);
         assert!(c.notify_on_complete && c.auto_retry);
+        assert!(c.auto_ui_scale);
         assert_eq!(c.watermark_opacity, 0.8);
         assert!(c.theme == Theme::Dark);
     }
@@ -300,11 +390,64 @@ mod tests {
         c.theme = Theme::Light;
         c.convert_engine = ConvertEngine::LibreOffice;
         c.home_pinned = vec!["music".into()];
+        c.auto_ui_scale = false;
         let json = serde_json::to_string(&c).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(back.music_format, "flac");
         assert!(back.theme == Theme::Light);
         assert_eq!(back.convert_engine, ConvertEngine::LibreOffice);
         assert_eq!(back.home_pinned, vec!["music"]);
+        assert!(!back.auto_ui_scale);
+    }
+
+    #[test]
+    fn auto_scale_hits_resolution_anchors() {
+        assert_eq!(auto_scale_for_monitor(720.0), 0.9);
+        assert_eq!(auto_scale_for_monitor(1080.0), 1.0);
+        assert_eq!(auto_scale_for_monitor(1440.0), 1.25);
+        assert_eq!(auto_scale_for_monitor(2160.0), 1.6);
+    }
+
+    #[test]
+    fn auto_scale_interpolates_and_clamps() {
+        assert!((auto_scale_for_monitor(900.0) - 0.95).abs() < 1e-5);
+        assert_eq!(auto_scale_for_monitor(240.0), 0.7);
+        assert_eq!(auto_scale_for_monitor(5000.0), 2.0);
+        assert_eq!(auto_scale_for_monitor(0.0), 0.7);
+    }
+
+    #[test]
+    fn fit_window_shrinks_to_85_percent_of_monitor() {
+        let (w, h) = fit_window_to_monitor(1920.0, 1080.0, 1280.0, 720.0);
+        assert!((w - 1280.0 * 0.85).abs() < 0.5);
+        assert!((h - 720.0 * 0.85).abs() < 0.5);
+        assert!(w <= 1280.0 * 0.85 + 0.01);
+        assert!(h <= 720.0 * 0.85 + 0.01);
+    }
+
+    #[test]
+    fn fit_window_leaves_valid_size_unchanged() {
+        assert_eq!(
+            fit_window_to_monitor(960.0, 640.0, 1920.0, 1080.0),
+            (960.0, 640.0)
+        );
+    }
+
+    #[test]
+    fn fit_window_respects_min_when_monitor_allows() {
+        let (w, h) = fit_window_to_monitor(500.0, 300.0, 1920.0, 1080.0);
+        // 500 < 45% de 1920 (864) → amplia; depois o mínimo 700×450.
+        assert!(w >= 700.0);
+        assert!(h >= 450.0);
+        assert!(w <= 1920.0 * 0.85);
+        assert!(h <= 1080.0 * 0.85);
+    }
+
+    #[test]
+    fn fit_window_enlarges_tiny_window_on_large_monitor() {
+        let (w, h) = fit_window_to_monitor(960.0, 640.0, 3840.0, 2160.0);
+        assert!((w - 3840.0 * 0.45).abs() < 1.0);
+        let expected_h = 640.0 * (3840.0 * 0.45 / 960.0);
+        assert!((h - expected_h).abs() < 1.0);
     }
 }

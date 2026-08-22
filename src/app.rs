@@ -101,6 +101,12 @@ pub struct App {
     /// Cache das pastas rastreadas, com a mesma estratégia de época.
     folders_cache: Vec<crate::db::database::FolderEntry>,
     folders_cache_epoch: u64,
+    /// Último `monitor_size` visto (pontos). Não persistido: serve para
+    /// detectar troca de monitor com o app aberto ou no primeiro frame.
+    last_monitor_size: Option<(f32, f32)>,
+    /// Tamanho enviado via `InnerSize` e até quando ignorar persistência, para
+    /// o SO aplicar o comando antes de `persist_window_size` gravar o valor velho.
+    pending_window_size: Option<(f32, f32, std::time::Instant)>,
 }
 
 pub struct Toast {
@@ -384,6 +390,8 @@ impl App {
             history_cache_epoch: u64::MAX,
             folders_cache: Vec::new(),
             folders_cache_epoch: u64::MAX,
+            last_monitor_size: None,
+            pending_window_size: None,
         }
     }
 
@@ -1481,7 +1489,6 @@ impl App {
             crate::ui::theme::set_compact(self.config.compact_ui);
             Self::setup_fonts(ctx);
             Self::setup_style(ctx);
-            ctx.set_pixels_per_point(self.config.ui_scale.clamp(0.7, 2.0));
             self.style_set = true;
         }
 
@@ -1492,6 +1499,9 @@ impl App {
             crate::ui::theme::set_compact(self.config.compact_ui);
             Self::setup_style(ctx);
         }
+
+        self.adjust_to_monitor(ctx);
+        ctx.set_pixels_per_point(self.config.ui_scale.clamp(0.7, 2.0));
 
         if self.engine.is_none() {
             self.ensure_engine();
@@ -1704,6 +1714,15 @@ impl App {
     fn persist_window_size(&mut self, ctx: &egui::Context) {
         let size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
         if let Some(sz) = size {
+            if let Some((tw, th, until)) = self.pending_window_size {
+                if ((sz.x - tw).abs() <= 2.0 && (sz.y - th).abs() <= 2.0)
+                    || std::time::Instant::now() >= until
+                {
+                    self.pending_window_size = None;
+                } else {
+                    return;
+                }
+            }
             if sz.x > 100.0 && sz.y > 100.0 {
                 if (sz.x - self.config.win_w).abs() > 1.0
                     || (sz.y - self.config.win_h).abs() > 1.0
@@ -1717,6 +1736,60 @@ impl App {
         if self.win_dirty && !ctx.input(|i| i.pointer.any_down()) {
             self.config.save();
             self.win_dirty = false;
+        }
+    }
+
+    /// Recalcula tamanho da janela e `ui_scale` no primeiro frame e sempre
+    /// que o monitor mudar (troca para TV, etc.).
+    fn adjust_to_monitor(&mut self, ctx: &egui::Context) {
+        if self.fullscreen {
+            return;
+        }
+        let Some(mon) = ctx.input(|i| i.viewport().monitor_size) else {
+            return;
+        };
+        if mon.x <= 1.0 || mon.y <= 1.0 {
+            return;
+        }
+        let changed = match self.last_monitor_size {
+            None => true,
+            Some((x, y)) => (x - mon.x).abs() > 1.0 || (y - mon.y).abs() > 1.0,
+        };
+        if !changed {
+            return;
+        }
+        self.last_monitor_size = Some((mon.x, mon.y));
+
+        let mut dirty = false;
+        let (new_w, new_h) = crate::config::settings::fit_window_to_monitor(
+            self.config.win_w,
+            self.config.win_h,
+            mon.x,
+            mon.y,
+        );
+        if (new_w - self.config.win_w).abs() > 1.0 || (new_h - self.config.win_h).abs() > 1.0 {
+            self.config.win_w = new_w;
+            self.config.win_h = new_h;
+            self.pending_window_size =
+                Some((new_w, new_h, std::time::Instant::now() + std::time::Duration::from_secs(2)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(new_w, new_h)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                ((mon.x - new_w) / 2.0).max(0.0),
+                ((mon.y - new_h) / 2.0).max(0.0),
+            )));
+            dirty = true;
+        }
+
+        if self.config.auto_ui_scale {
+            let scale = crate::config::settings::auto_scale_for_monitor(mon.y);
+            if (scale - self.config.ui_scale).abs() > 0.01 {
+                self.config.ui_scale = scale;
+                dirty = true;
+            }
+        }
+
+        if dirty {
+            self.config.save();
         }
     }
 }
