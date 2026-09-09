@@ -1343,6 +1343,9 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
     let is_live;
     let live_bytes;
     let stage;
+    let preference;
+    let engine_status;
+    let suggested_filename;
 
     {
         let op = app.operation.lock().unwrap();
@@ -1351,6 +1354,9 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
         is_live = op.is_live;
         live_bytes = op.live_bytes;
         stage = op.stage;
+        preference = op.engine;
+        engine_status = op.engine_status.clone();
+        suggested_filename = op.suggested_filename.clone();
         preview = op.preview.clone();
         url = op.url.clone();
         title = op.title.clone();
@@ -1413,6 +1419,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
             let mut new_subfolder_name = subfolder_name.clone();
             let mut new_format = output_format.clone();
             let mut new_quality = quality.clone();
+            let mut new_engine = preference;
             let mut new_clip_enabled = clip_enabled;
             let mut new_clip_start = clip_start.clone();
             let mut new_clip_end = clip_end.clone();
@@ -1524,6 +1531,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                     }
                     ui.add_space(6.0);
 
+                    if !is_convert { crate::ui::settings_tab::engine_selector(ui, &mut new_engine, app.config.lang == crate::ui::i18n::Lang::Pt); }
                     ui.label(s.f_filename);
                     ui.text_edit_singleline(&mut new_file_name);
                     ui.add_space(6.0);
@@ -1815,9 +1823,21 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                         let mut op = app.operation.lock().unwrap();
                         op.phase = DownloadPhase::Idle;
                     }
+                    let cobalt_reason = if !is_convert && new_engine == crate::download::engine::EnginePreference::Cobalt {
+                        let options = crate::download::engine::DownloadOptions {
+                            is_live,
+                            live_from_start: new_live_from_start,
+                            clip: if new_clip_enabled {Some((new_clip_start.clone(),new_clip_end.clone()))} else {None},
+                            subtitle_langs: if app.config.subtitles && media_type == MediaType::Video {Some(app.config.sub_langs.clone())} else {None},
+                            rate_limit: Some(app.config.rate_limit.clone()),
+                            ..Default::default()
+                        };
+                        crate::download::engine::cobalt_unsupported(&url,&options)
+                    } else {None};
+                    if let Some(reason)=cobalt_reason {ui.colored_label(theme::danger(),reason);}
                     let confirm_label = if is_convert { s.btn_convert } else { s.btn_confirm };
                     if ui
-                        .add(
+                        .add_enabled(cobalt_reason.is_none(),
                             egui::Button::new(egui::RichText::new(confirm_label).color(Color32::WHITE))
                                 .fill(theme::accent())
                                 .min_size(egui::vec2(200.0, 36.0)),
@@ -1858,6 +1878,8 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                             let captured_path = output_path.to_string_lossy().to_string();
                             let captured_format = new_format.clone();
                             let captured_quality = new_quality.clone();
+                            let captured_engine = new_engine;
+                            let captured_custom = if new_file_name != suggested_filename { Some(new_file_name.clone()) } else { None };
                             let captured_folder = target_folder.to_string_lossy().to_string();
                             let captured_title = title.clone();
                             let captured_media_type = media_type;
@@ -1958,13 +1980,16 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                             let on_progress =
                                                 move |pr: crate::download::engine::Progress| {
                                                     if let Ok(mut s) = progress_state.lock() {
-                                                        s.progress =
-                                                            Some((pr.fraction.clamp(0.0, 1.0)) as f32);
+                                                        s.progress = if pr.indeterminate {None} else {Some((pr.fraction.clamp(0.0, 1.0)) as f32)};
+                                                        s.engine_status = if pr.fallback { "yt-dlp → Cobalt".into() } else { pr.engine.map(|e|e.label().to_string()).unwrap_or_default() };
                                                         s.live_bytes = pr.downloaded_bytes;
                                                         s.stage = pr.stage;
                                                     }
                                                 };
                                             let opts = crate::download::engine::DownloadOptions {
+                                                engine: captured_engine,
+                                                custom_filename: captured_custom,
+                                                staging_id: None,
                                                 is_audio: captured_media_type == MediaType::Music,
                                                 format: captured_format.clone(),
                                                 quality: captured_quality.clone(),
@@ -1988,6 +2013,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                                         match result
                                         {
                                             Ok(p) => {
+                                                let captured_title = if captured_title.is_empty() { crate::download::engine::completed_title(&p) } else {captured_title};
                                                 let file_size = std::fs::metadata(&p)
                                                     .ok()
                                                     .map(|m| m.len() as i64);
@@ -2051,6 +2077,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                     op.subfolder_name = new_subfolder_name;
                     op.output_format = new_format;
                     op.quality = new_quality;
+                    op.engine = new_engine;
                     op.clip_enabled = new_clip_enabled;
                     op.clip_start = new_clip_start;
                     op.clip_end = new_clip_end;
@@ -2154,6 +2181,7 @@ fn render_modal(app: &mut App, ctx: &egui::Context) {
                             // Pós-processamento: sem transferência (some B/s).
                             // Transcoding: % real do ffmpeg — vídeo longo sem %
                             // parece travado.
+                            if !engine_status.is_empty() {ui.label(&engine_status);}
                             let post_stage = stage != Stage::Downloading;
                             let display: String = if post_stage {
                                 match stage {

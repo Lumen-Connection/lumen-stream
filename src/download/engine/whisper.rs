@@ -23,6 +23,7 @@ impl DownloadEngine {
             .unwrap_or_else(|| "audio".to_string());
 
         let wav = folder.join(format!("{}.whisper.wav", stem));
+        self.ensure_ffmpeg().await?;
         let mut conv = tokio::process::Command::new(&self.ffmpeg_path);
         conv.arg("-y")
             .arg("-i")

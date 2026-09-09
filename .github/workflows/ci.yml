@@ -10,6 +10,17 @@ jobs:
     runs-on: windows-latest   # VM Windows, igual ao ambiente dos seus usuários
     steps:
       - uses: actions/checkout@v4   # passo 1: clona seu código na VM
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '9.15.9'
+      - name: Cobalt packaging gate
+        shell: pwsh
+        run: ./scripts/cobalt/package.ps1
       - uses: Swatinem/rust-cache@v2
       - name: Rodar testes
-        run: cargo test               # passo 2: os seus 76 testes
+        run: cargo test
+      - name: Cobalt independence and lifecycle gates
+        run: cargo test cobalt_gate -- --ignored

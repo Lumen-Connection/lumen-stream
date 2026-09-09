@@ -212,6 +212,9 @@ pub enum UpdateStatus {
 }
 
 pub struct DownloadOperation {
+    pub engine: crate::download::engine::EnginePreference,
+    pub engine_status: String,
+    pub suggested_filename: String,
     pub phase: DownloadPhase,
     pub url: String,
     pub title: String,
@@ -281,6 +284,9 @@ impl App {
         let engine_holder: Arc<Mutex<Option<DownloadEngine>>> = Arc::new(Mutex::new(None));
 
         let operation = Arc::new(Mutex::new(DownloadOperation {
+            engine: config.download_engine,
+            engine_status: String::new(),
+            suggested_filename: String::new(),
             phase: DownloadPhase::Idle,
             url: String::new(),
             title: String::new(),
@@ -1070,6 +1076,8 @@ impl App {
             let mut op = self.operation.lock().unwrap();
             op.phase = DownloadPhase::Fetching;
             op.url = url.clone();
+            op.engine = self.config.download_engine;
+            op.engine_status.clear();
             op.media_type = media_type;
             op.output_format = format;
             op.quality = self.config.quality.clone();
@@ -1081,15 +1089,16 @@ impl App {
 
         let op_ref = self.operation.clone();
         let engine = self.engine.clone();
+        let preference = self.config.download_engine;
         let template = self.config.filename_template.clone();
         let smart = self.config.smart_rename;
         let err_engine = s.err_engine.to_string();
         self.download_task = Some(tokio::spawn(async move {
             match engine {
                 Some(ref eng) => {
-                    let url = eng.resolve_source(&url).await;
+                    let url = if preference == crate::download::engine::EnginePreference::Cobalt { url } else { eng.resolve_source(&url).await };
                     op_ref.lock().unwrap().url = url.clone();
-                    match eng.fetch_preview(&url).await {
+                    match eng.preview_with_engine(&url, preference).await {
                     Ok(preview) => {
                         let mut op = op_ref.lock().unwrap();
                         op.title = preview.title.clone();
@@ -1105,6 +1114,7 @@ impl App {
                         );
                         let safe = crate::download::engine::sanitize_filename(&base);
                         op.file_name = format!("{}.{}", safe, op.output_format);
+                        op.suggested_filename = op.file_name.clone();
                         op.is_live = preview.is_live;
                         op.preview = Some(preview);
                         op.phase = DownloadPhase::Configuring;
@@ -1185,6 +1195,11 @@ impl App {
             if !crate::download::engine::looks_like_url(&url) {
                 i.loading = false;
                 i.error = Some("URL inválida.".to_string());
+                return;
+            }
+            if self.config.download_engine == crate::download::engine::EnginePreference::Cobalt {
+                i.loading = false;
+                i.error = Some("Detailed formats require yt-dlp / Lista detalhada de formatos requer yt-dlp".into());
                 return;
             }
             i.loading = true;
@@ -1276,6 +1291,8 @@ impl App {
             let mut op = self.operation.lock().unwrap();
             op.phase = DownloadPhase::Downloading("Transcrevendo: baixando áudio...".to_string());
             op.url = url.clone();
+            op.engine = self.config.download_engine;
+            op.engine_status.clear();
             op.media_type = media_type;
             op.progress = None;
             op.preview = None;

@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::app::MediaType;
 use crate::db::database::Database;
-use crate::download::engine::DownloadEngine;
+use crate::download::engine::{DownloadEngine, EnginePreference};
 
 #[derive(Clone, PartialEq)]
 pub enum JobStatus {
@@ -21,6 +21,9 @@ pub enum JobStatus {
 }
 
 pub struct QueueJob {
+    pub engine: EnginePreference,
+    pub engine_status: String,
+    pub staging_id: String,
     pub id: u64,
     pub url: String,
     pub title: String,
@@ -38,6 +41,10 @@ pub struct QueueJob {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedJob {
+    #[serde(default = "new_staging_id")]
+    staging_id: String,
+    #[serde(default)]
+    engine: EnginePreference,
     url: String,
     title: String,
     media_type: MediaType,
@@ -85,6 +92,8 @@ impl Queue {
                 !matches!(j.status, JobStatus::Completed(_) | JobStatus::Cancelled)
             })
             .map(|j| SavedJob {
+                engine: j.engine,
+                staging_id: j.staging_id.clone(),
                 url: j.url.clone(),
                 title: j.title.clone(),
                 media_type: j.media_type,
@@ -111,7 +120,8 @@ impl Queue {
             return;
         };
         for j in saved {
-            push_job(
+            let staging_id = uuid::Uuid::parse_str(&j.staging_id).map(|id|id.to_string()).unwrap_or_else(|_|new_staging_id());
+            let id = push_job_with_engine(
                 &self.jobs,
                 &self.next_id,
                 j.url,
@@ -120,7 +130,9 @@ impl Queue {
                 j.format,
                 j.quality,
                 j.folder,
+                j.engine,
             );
+            if let Some(job)=self.jobs.lock().unwrap().iter_mut().find(|job|job.id==id) {job.staging_id=staging_id;}
         }
     }
 
@@ -132,9 +144,10 @@ impl Queue {
         format: String,
         quality: String,
         folder: PathBuf,
+        engine: EnginePreference,
     ) {
-        push_job(
-            &self.jobs, &self.next_id, url, title, media_type, format, quality, folder,
+        push_job_with_engine(
+            &self.jobs, &self.next_id, url, title, media_type, format, quality, folder, engine,
         );
     }
 
@@ -264,10 +277,12 @@ impl Queue {
                         j.format.clone(),
                         j.quality.clone(),
                         j.folder.clone(),
+                        j.engine,
+                        j.staging_id.clone(),
                     )
                 })
             };
-            let Some((url, media_type, format, quality, folder)) = snapshot else {
+            let Some((url, media_type, format, quality, folder, preference, staging_id)) = snapshot else {
                 continue;
             };
 
@@ -283,18 +298,10 @@ impl Queue {
             let handle = tokio::spawn(async move {
                 // Spotify faixa única e outros resolvem para ytsearch1:… aqui,
                 // antes do fetch_info / download (mesmo padrão do download avulso).
-                let url = engine.resolve_source(&url).await;
-                let title = match engine.fetch_info(&url).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let msg = crate::download::engine::friendly_error(&e.to_string());
-                        set_status(
-                            &jobs,
-                            id,
-                            JobStatus::Failed(format!("Falha ao obter info: {}", msg)),
-                        );
-                        return;
-                    }
+                let url = if preference == EnginePreference::Cobalt { url } else { engine.resolve_source(&url).await };
+                let title = match engine.preview_with_engine(&url, preference).await {
+                    Ok(preview) => preview.title,
+                    Err(e) => { set_status(&jobs,id,JobStatus::Failed(e.to_string())); return; }
                 };
                 set_title(&jobs, id, title.clone());
 
@@ -313,6 +320,11 @@ impl Queue {
 
                 let jobs_cb = jobs.clone();
                 let on_progress = move |pr: crate::download::engine::Progress| {
+                    {
+                        if let Some(j) = jobs_cb.lock().unwrap().iter_mut().find(|j|j.id==id) {
+                            j.engine_status = if pr.fallback { "yt-dlp → Cobalt".into() } else { pr.engine.map(|e|e.label().to_string()).unwrap_or_default() };
+                        }
+                    }
                     set_progress(
                         &jobs_cb,
                         id,
@@ -321,10 +333,14 @@ impl Queue {
                         pr.eta_secs,
                         pr.stage,
                     );
+                    if pr.indeterminate { if let Some(j)=jobs_cb.lock().unwrap().iter_mut().find(|j|j.id==id) {j.progress=None;} }
                 };
 
                 let subs = if is_music { None } else { subtitle_langs };
                 let opts = crate::download::engine::DownloadOptions {
+                    engine: preference,
+                    custom_filename: None,
+                    staging_id: Some(staging_id),
                     is_audio: is_music,
                     format: format.clone(),
                     quality: quality.clone(),
@@ -342,6 +358,8 @@ impl Queue {
                     .await
                 {
                     Ok(p) => {
+                        let title = if title.is_empty() { crate::download::engine::completed_title(&p) } else { title };
+                        set_title(&jobs,id,title.clone());
                         if let Some(cloud) = &cloud_folder {
                             if let Some(name) = p.file_name() {
                                 let dest = std::path::Path::new(cloud).join(name);
@@ -368,7 +386,7 @@ impl Queue {
                     }
                     Err(e) => {
                         let msg = e.to_string();
-                        let network = is_network_error(&msg);
+                        let network = e.downcast_ref::<crate::download::engine::DownloadFailure>().map(|e|e.kind == crate::download::engine::FailureKind::Transport).unwrap_or_else(||is_network_error(&msg));
                         let mut jl = jobs.lock().unwrap();
                         if let Some(j) = jl.iter_mut().find(|j| j.id == id) {
                             if auto_retry && network && j.retries < 2 {
@@ -387,7 +405,9 @@ impl Queue {
     }
 }
 
-pub fn push_job(
+fn new_staging_id() -> String {uuid::Uuid::new_v4().to_string()}
+
+pub fn push_job_with_engine(
     jobs: &Jobs,
     next_id: &Arc<AtomicU64>,
     url: String,
@@ -396,9 +416,13 @@ pub fn push_job(
     format: String,
     quality: String,
     folder: PathBuf,
-) {
+    engine: EnginePreference,
+) -> u64 {
     let id = next_id.fetch_add(1, Ordering::SeqCst);
     jobs.lock().unwrap().push(QueueJob {
+        engine,
+        engine_status: String::new(),
+        staging_id: new_staging_id(),
         id,
         url,
         title,
@@ -413,6 +437,7 @@ pub fn push_job(
         eta: 0,
         stage: crate::download::engine::Stage::Downloading,
     });
+    id
 }
 
 fn set_status(jobs: &Jobs, id: u64, status: JobStatus) {
@@ -538,8 +563,7 @@ mod tests {
             MediaType::Music,
             "mp3".to_string(),
             "best".to_string(),
-            PathBuf::from("C:/out"),
-        );
+            PathBuf::from("C:/out"), EnginePreference::Auto);
     }
 
     fn ids(q: &Queue) -> Vec<u64> {
@@ -658,6 +682,17 @@ mod tests {
         // Tudo volta como Queued, pronto para o pump.
         assert!(q2.jobs.lock().unwrap().iter().all(|j| j.status == JobStatus::Queued));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn saved_engine_defaults_and_roundtrip() {
+        let old = r#"{"url":"https://example.com/video","title":"test","media_type":"Video","format":"mp4","quality":"best","folder":"downloads"}"#;
+        let job:SavedJob=serde_json::from_str(old).unwrap();
+        assert_eq!(job.engine,EnginePreference::Auto);
+        let mut job=job;job.engine=EnginePreference::Cobalt;
+        let back:SavedJob=serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
+        assert_eq!(back.engine,EnginePreference::Cobalt);
+        assert_eq!(back.staging_id,job.staging_id);
     }
 
     #[test]

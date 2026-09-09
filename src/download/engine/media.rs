@@ -133,8 +133,8 @@ pub(super) fn finalize_mode(profile: &VideoProfile, codecs: &StreamCodecs) -> Fi
             }
         }
         "webm" => {
-            let v_ok = matches!(v, Some("vp9") | Some("vp8"));
-            let a_ok = matches!(a, Some("opus") | Some("vorbis") | None);
+            let v_ok = v == Some("vp9");
+            let a_ok = matches!(a, Some("opus") | None);
             if v_ok && a_ok {
                 FinalizeMode::RemuxCopy
             } else if v_ok {
@@ -144,9 +144,11 @@ pub(super) fn finalize_mode(profile: &VideoProfile, codecs: &StreamCodecs) -> Fi
             }
         }
         "mkv" => {
-            // Perfil AV1: só remux se já for AV1 (áudio livre no MKV).
-            if v == Some("av1") {
+            // Keep the declared AV1/FLAC profile for both extraction engines.
+            if v == Some("av1") && matches!(a, Some("flac") | None) {
                 FinalizeMode::RemuxCopy
+            } else if v == Some("av1") {
+                FinalizeMode::RecodeAudio
             } else {
                 FinalizeMode::FullEncode
             }
@@ -158,6 +160,7 @@ pub(super) fn finalize_mode(profile: &VideoProfile, codecs: &StreamCodecs) -> Fi
 impl DownloadEngine {
     /// Duração do arquivo via `ffmpeg -i` (stderr).
     async fn probe_duration_secs(&self, input: &Path) -> Option<f64> {
+        self.ensure_ffmpeg().await.ok()?;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-hide_banner")
             .arg("-nostdin")
@@ -186,6 +189,7 @@ impl DownloadEngine {
         F: Fn(Progress) + Send + Sync,
         C: FnOnce(&mut tokio::process::Command),
     {
+        self.ensure_ffmpeg().await?;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         #[cfg(windows)]
         cmd.creation_flags(0x08000000);
@@ -230,6 +234,7 @@ impl DownloadEngine {
                         if t == "progress=end" {
                             if let Some(cb) = on_progress {
                                 cb(Progress {
+                engine: None, indeterminate: false, fallback: false,
                                     fraction: 1.0,
                                     ..Default::default()
                                 });
@@ -239,6 +244,7 @@ impl DownloadEngine {
                         if let (Some(total), Some(secs)) = (total_secs, parse_out_time_us(t)) {
                             if let Some(cb) = on_progress {
                                 cb(Progress {
+                engine: None, indeterminate: false, fallback: false,
                                     fraction: progress_fraction(secs, total),
                                     ..Default::default()
                                 });
@@ -267,6 +273,7 @@ impl DownloadEngine {
         }
         if let Some(cb) = on_progress {
             cb(Progress {
+                engine: None, indeterminate: false, fallback: false,
                 fraction: 1.0,
                 ..Default::default()
             });
@@ -275,6 +282,7 @@ impl DownloadEngine {
     }
 
     async fn probe_stream_codecs(&self, input: &Path) -> StreamCodecs {
+        if self.ensure_ffmpeg().await.is_err() {return StreamCodecs::default();}
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-hide_banner")
             .arg("-nostdin")
@@ -323,6 +331,7 @@ impl DownloadEngine {
                 let on_fin = |pr: Progress| {
                     if let Some(cb) = on_progress {
                         cb(Progress {
+                engine: None, indeterminate: false, fallback: false,
                             fraction: pr.fraction,
                             stage: Stage::Finalizing,
                             ..Default::default()
@@ -330,6 +339,7 @@ impl DownloadEngine {
                     }
                 };
                 on_fin(Progress {
+                engine: None, indeterminate: false, fallback: false,
                     fraction: 0.0,
                     stage: Stage::Finalizing,
                     ..Default::default()
@@ -361,6 +371,7 @@ impl DownloadEngine {
                 let on_fin = |pr: Progress| {
                     if let Some(cb) = on_progress {
                         cb(Progress {
+                engine: None, indeterminate: false, fallback: false,
                             fraction: pr.fraction,
                             stage: Stage::Finalizing,
                             ..Default::default()
@@ -368,6 +379,7 @@ impl DownloadEngine {
                     }
                 };
                 on_fin(Progress {
+                engine: None, indeterminate: false, fallback: false,
                     fraction: 0.0,
                     stage: Stage::Finalizing,
                     ..Default::default()
@@ -408,6 +420,7 @@ impl DownloadEngine {
                 let on_tc = |pr: Progress| {
                     if let Some(cb) = on_progress {
                         cb(Progress {
+                engine: None, indeterminate: false, fallback: false,
                             fraction: pr.fraction,
                             stage: Stage::Transcoding,
                             ..Default::default()
@@ -415,6 +428,7 @@ impl DownloadEngine {
                     }
                 };
                 on_tc(Progress {
+                engine: None, indeterminate: false, fallback: false,
                     fraction: 0.0,
                     stage: Stage::Transcoding,
                     ..Default::default()
@@ -464,6 +478,7 @@ impl DownloadEngine {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).ok();
         }
+        self.ensure_ffmpeg().await?;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-y")
             .arg("-i")
@@ -485,6 +500,7 @@ impl DownloadEngine {
     pub async fn detect_bpm(&self, file: &str) -> Result<u32, Box<dyn std::error::Error>> {
         const SR: usize = 11025;
         const FRAME: usize = 512;
+        self.ensure_ffmpeg().await?;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-i")
             .arg(file)
@@ -545,6 +561,7 @@ impl DownloadEngine {
     }
 
     pub async fn probe_metadata(&self, file: &str) -> Result<String, Box<dyn std::error::Error>> {
+        self.ensure_ffmpeg().await?;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-hide_banner").arg("-i").arg(file);
         #[cfg(windows)]
@@ -653,6 +670,7 @@ impl DownloadEngine {
         std::fs::create_dir_all(&out_dir)?;
         let pattern = out_dir.join("frame_%04d.png");
 
+        self.ensure_ffmpeg().await?;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-y")
             .arg("-i")
@@ -703,7 +721,8 @@ impl DownloadEngine {
                 .unwrap_or_else(|| stem.clone());
             let out = out_dir.join(format!("{}.{}", stem, format));
 
-            let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
+            self.ensure_ffmpeg().await?;
+        let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
             cmd.arg("-y").arg("-i").arg(inp);
             if max_width > 0 {
                 cmd.arg("-vf").arg(format!("scale='min({},iw)':-2", max_width));
@@ -737,6 +756,7 @@ impl DownloadEngine {
     }
 
     pub async fn verify_integrity(&self, file: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.ensure_ffmpeg().await?;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-v")
             .arg("error")
@@ -843,6 +863,7 @@ impl DownloadEngine {
             pos = overlay_pos
         );
 
+        self.ensure_ffmpeg().await?;
         let mut cmd = tokio::process::Command::new(&self.ffmpeg_path);
         cmd.arg("-y")
             .arg("-i")
@@ -1164,7 +1185,7 @@ mod tests {
                     audio: Some("opus".into()),
                 }
             ),
-            FinalizeMode::RemuxCopy
+            FinalizeMode::RecodeAudio
         );
     }
 

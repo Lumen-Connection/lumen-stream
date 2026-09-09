@@ -10,6 +10,7 @@ pub fn render(app: &mut App, ctx: &egui::Context, ui: &mut egui::Ui) {
     ui.add_space(20.0);
 
     let mut changed = false;
+    changed |= engine_selector(ui, &mut app.config.download_engine, app.config.lang == Lang::Pt);
 
     let ncols = if ui.available_width() > 980.0 { 2 } else { 1 };
     let right_idx = if ncols == 2 { 1 } else { 0 };
@@ -535,6 +536,20 @@ fn card_maintenance(ui: &mut egui::Ui, app: &mut App, changed: &mut bool) {
         );
         ui.add_space(10.0);
 
+        let cobalt_busy = app.queue.has_active() || matches!(app.operation.lock().unwrap().phase, crate::app::DownloadPhase::Fetching | crate::app::DownloadPhase::Downloading(_));
+        if ui.add_enabled(!cobalt_busy && app.engine.is_some(), egui::Button::new(if pt {"Instalar / reparar Cobalt"} else {"Install / repair Cobalt"})).clicked() {
+            if let Some(engine) = app.engine.clone() {
+                let toasts = app.toast_queue.clone();
+                tokio::spawn(async move {
+                    let result = engine.repair_cobalt().await;
+                    let text = match &result { Ok(()) => "Cobalt ready / Cobalt pronto".to_string(), Err(e) => e.clone() };
+                    toasts.lock().unwrap().push((text, result.is_err()));
+                });
+            }
+        }
+        if ui.button(if pt {"Verificar dependências"} else {"Check dependencies"}).clicked() { app.refresh_deps(); }
+        for (name,status) in app.deps_status.lock().unwrap().iter() {ui.label(format!("{name}: {status}"));}
+
         let status = app.update_status.lock().unwrap().clone();
         let running = status == UpdateStatus::Running;
 
@@ -718,4 +733,17 @@ pub fn start_update(app: &mut App) {
             Err(e) => UpdateStatus::Error(e.to_string()),
         };
     });
+}
+
+/// Shared preference control for defaults, batches and individual downloads.
+pub fn engine_selector(ui: &mut egui::Ui, value: &mut crate::download::engine::EnginePreference, pt: bool) -> bool {
+    use crate::download::engine::EnginePreference;
+    let before = *value;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(if pt {"Motor de download"} else {"Download engine"});
+        for engine in [EnginePreference::Auto, EnginePreference::YtDlp, EnginePreference::Cobalt] {
+            ui.selectable_value(value, engine, engine.label());
+        }
+    });
+    before != *value
 }

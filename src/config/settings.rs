@@ -32,6 +32,8 @@ impl Default for ConvertEngine {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub download_engine: crate::download::engine::EnginePreference,
     pub default_download_dir: PathBuf,
     pub music_format: String,
     pub video_format: String,
@@ -252,6 +254,7 @@ impl Default for Config {
             .join("LumenStream");
 
         Config {
+            download_engine: Default::default(),
             default_download_dir: downloads_dir,
             music_format: "mp3".to_string(),
             video_format: "mp4".to_string(),
@@ -351,6 +354,7 @@ mod tests {
         assert!(c.auto_ui_scale);
         assert_eq!((c.win_w, c.win_h), (960.0, 640.0));
         assert!(c.notify_on_complete && c.smart_rename && c.auto_retry);
+        assert_eq!(c.download_engine,crate::download::engine::EnginePreference::Auto);
         assert!(!c.subtitles && !c.high_contrast && !c.onboarded);
         assert!(c.theme == Theme::Dark);
         assert_eq!(c.convert_engine, ConvertEngine::Auto);
@@ -373,6 +377,7 @@ mod tests {
             "max_history": 10
         }"#;
         let c: Config = serde_json::from_str(minimal).expect("json mínimo deve carregar");
+        assert_eq!(c.download_engine,crate::download::engine::EnginePreference::Auto);
         assert_eq!(c.music_format, "opus");
         assert_eq!(c.max_history, 10);
         assert_eq!(c.sub_langs, "pt,en");

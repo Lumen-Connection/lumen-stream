@@ -73,7 +73,7 @@ impl DownloadEngine {
         Ok(preview)
     }
 
-    pub async fn fetch_and_download<F>(
+    pub(super) async fn ytdlp_fetch_and_download<F>(
         &self,
         url: &str,
         output_path: &str,
@@ -81,8 +81,10 @@ impl DownloadEngine {
         on_progress: F,
     ) -> Result<PathBuf, Box<dyn std::error::Error>>
     where
-        F: Fn(Progress) + Send + Sync + 'static,
+        F: Fn(Progress) + Send + Sync,
     {
+        self.ensure_ytdlp().await?;
+        self.ensure_ffmpeg().await?;
         if !looks_like_url(url) {
             return Err("URL inválida. Cole um link válido (ex.: https://...)".into());
         }
@@ -99,6 +101,7 @@ impl DownloadEngine {
         // O estágio (Finalizing vs Transcoding) vem do finalize.
         let on_tc = |pr: Progress| {
             on_progress(Progress {
+                engine: None, indeterminate: false, fallback: false,
                 fraction: pr.fraction,
                 stage: pr.stage,
                 speed_bps: 0.0,
@@ -135,8 +138,10 @@ impl DownloadEngine {
         url: &str,
         args: &[&str],
     ) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        self.ensure_ytdlp().await?;
         let run = |fallback: bool| {
-            let mut cmd = tokio::process::Command::new(self.ytdlp_path());
+        let mut cmd = tokio::process::Command::new(self.ytdlp_path());
+            cmd.kill_on_drop(true);
             cmd.args(args);
             if fallback {
                 apply_youtube_player_fallback(&mut cmd, url);
@@ -297,7 +302,8 @@ impl DownloadEngine {
 
         let mut attempt = 0u32;
         while attempt < max_attempts {
-            let mut cmd = tokio::process::Command::new(self.ytdlp_path());
+            self.ensure_ytdlp().await?;
+        let mut cmd = tokio::process::Command::new(self.ytdlp_path());
             cmd.arg("--no-warnings")
                 .arg("--no-playlist")
                 .arg("--newline")
@@ -495,6 +501,7 @@ impl DownloadEngine {
                                 (0.0, last_bytes)
                             };
                             on_progress(Progress {
+                engine: None, indeterminate: false, fallback: false,
                                 fraction: last_frac,
                                 speed_bps: speed,
                                 eta_secs: last_eta,
@@ -536,6 +543,7 @@ impl DownloadEngine {
                                 }
                             }
                             on_progress(Progress {
+                engine: None, indeterminate: false, fallback: false,
                                 fraction: last_frac,
                                 speed_bps: last_speed,
                                 eta_secs: last_eta,
@@ -567,6 +575,7 @@ impl DownloadEngine {
                 let _ = child.wait().await;
                 if let Some(p) = self.finalize_live_partials(&folder, &stem, &final_ext).await {
                     on_progress(Progress {
+                engine: None, indeterminate: false, fallback: false,
                         fraction: 1.0,
                         stage: Stage::Finalizing,
                         ..Default::default()
@@ -581,6 +590,7 @@ impl DownloadEngine {
 
             if status.success() {
                 on_progress(Progress {
+                engine: None, indeterminate: false, fallback: false,
                     fraction: 1.0,
                     stage: last_stage,
                     downloaded_bytes: last_bytes,
@@ -615,6 +625,7 @@ impl DownloadEngine {
                 if let Some(p) = self.finalize_live_partials(&folder, &stem, &final_ext).await {
                     crate::applog::info("live caiu; gravação parcial finalizada");
                     on_progress(Progress {
+                engine: None, indeterminate: false, fallback: false,
                         fraction: 1.0,
                         stage: Stage::Finalizing,
                         ..Default::default()
@@ -710,6 +721,7 @@ impl DownloadEngine {
         // fila sem itens. `--print "%(id)s|%(title)s"` dá uma linha por item; o id
         // (11 chars, sem `|`) fica antes do primeiro `|`, então split_once basta.
         let url = format!("https://www.youtube.com/playlist?list={}", playlist_id);
+        self.ensure_ytdlp().await?;
         let mut cmd = tokio::process::Command::new(self.ytdlp_path());
         cmd.arg("--no-warnings")
             .arg("--flat-playlist")
@@ -863,12 +875,14 @@ impl DownloadEngine {
         url: &str,
         folder: &Path,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.ensure_ffmpeg().await?;
         std::fs::create_dir_all(folder).ok();
         let before: std::collections::HashSet<PathBuf> = std::fs::read_dir(folder)
             .map(|rd| rd.flatten().map(|e| e.path()).collect())
             .unwrap_or_default();
 
         let template = folder.join("%(title)s.%(ext)s");
+        self.ensure_ytdlp().await?;
         let mut cmd = tokio::process::Command::new(self.ytdlp_path());
         cmd.arg("--no-warnings")
             .arg("--no-playlist")
@@ -909,6 +923,7 @@ impl DownloadEngine {
         &self,
         url: &str,
     ) -> Result<Vec<FormatRow>, Box<dyn std::error::Error>> {
+        self.ensure_ytdlp().await?;
         let mut cmd = tokio::process::Command::new(self.ytdlp_path());
         cmd.arg("--no-warnings")
             .arg("--no-playlist")
@@ -1099,7 +1114,7 @@ fn spotify_track_label(map: &serde_json::Map<String, serde_json::Value>) -> Opti
     })
 }
 
-fn move_subtitle_sidecars(source: &Path, output: &Path) {
+pub(super) fn move_subtitle_sidecars(source: &Path, output: &Path) {
     let Some(folder) = source.parent() else {
         return;
     };
@@ -1128,9 +1143,10 @@ fn move_subtitle_sidecars(source: &Path, output: &Path) {
         if !is_srt || !name.starts_with(&source_stem) {
             continue;
         }
-        let destination = folder.join(format!("{}{}", output_stem, &name[source_stem.len()..]));
-        let _ = std::fs::remove_file(&destination);
-        let _ = std::fs::rename(path, destination);
+        let destination = output.parent().unwrap_or(folder).join(format!("{}{}", output_stem, &name[source_stem.len()..]));
+        if path != destination && super::cobalt::publish_file(&path, &destination).is_ok() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -1197,6 +1213,14 @@ struct YtFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_subtitles_follow_published_output() {
+        let temp=tempfile::tempdir().unwrap();let stage=temp.path().join("stage");std::fs::create_dir(&stage).unwrap();
+        std::fs::write(stage.join("source.en.srt"),b"subtitle").unwrap();
+        move_subtitle_sidecars(&stage.join("source.mp4"),&temp.path().join("published.mp4"));
+        assert_eq!(std::fs::read(temp.path().join("published.en.srt")).unwrap(),b"subtitle");
+    }
 
     #[test]
     fn video_source_uses_a_temporary_mkv_next_to_final_output() {

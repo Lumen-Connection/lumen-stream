@@ -17,6 +17,9 @@ pub enum Stage {
 
 #[derive(Clone, Copy, Default)]
 pub struct Progress {
+    pub engine: Option<super::routing::EnginePreference>,
+    pub indeterminate: bool,
+    pub fallback: bool,
     pub fraction: f64,
     pub speed_bps: f64,
     pub eta_secs: u64,
@@ -32,6 +35,11 @@ pub struct NetStats {
 
 #[derive(Clone)]
 pub struct DownloadOptions {
+    pub engine: super::routing::EnginePreference,
+    /// None lets the engine use the source filename.
+    pub custom_filename: Option<String>,
+    /// Stable queue identity; yt-dlp partials survive pause/restart.
+    pub staging_id: Option<String>,
     pub is_audio: bool,
     pub format: String,
     pub quality: String,
@@ -51,6 +59,9 @@ pub struct DownloadOptions {
 impl Default for DownloadOptions {
     fn default() -> Self {
         DownloadOptions {
+            engine: Default::default(),
+            custom_filename: None,
+            staging_id: None,
             is_audio: false,
             format: "mp4".to_string(),
             quality: "best".to_string(),

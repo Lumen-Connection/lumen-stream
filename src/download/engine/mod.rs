@@ -7,6 +7,10 @@ use std::time::Duration;
 use yt_dlp::client::deps::Libraries;
 
 mod audio_tags;
+mod cobalt;
+mod companion;
+mod routing;
+pub use routing::{EnginePreference, DownloadFailure, FailureKind, cobalt_unsupported};
 mod convert;
 mod download;
 mod fs_utils;
@@ -36,6 +40,8 @@ use self::whisper::find_whisper_exe;
 
 pub struct DownloadEngine {
     ffmpeg_path: PathBuf,
+    companion: tokio::sync::Mutex<companion::Companion>,
+    dependency_lock: tokio::sync::Mutex<()>,
     libs_dir: PathBuf,
     preview_cache: Mutex<HashMap<String, VideoPreview>>,
     net: Mutex<NetStats>,
@@ -52,21 +58,39 @@ impl DownloadEngine {
         std::fs::create_dir_all(&output_dir)?;
         cleanup_temp_dir(&output_dir);
 
-        let libraries = Libraries::new(
-            binary_path(&libs_dir, "yt-dlp"),
-            binary_path(&libs_dir, "ffmpeg"),
-        );
-
-        let libraries = libraries.install_dependencies().await?;
-        let ffmpeg_path = libraries.ffmpeg.clone();
+        let ffmpeg_path = binary_path(&libs_dir, "ffmpeg");
 
         Ok(DownloadEngine {
             ffmpeg_path,
+            companion: Default::default(),
+            dependency_lock: Default::default(),
             libs_dir,
             preview_cache: Mutex::new(HashMap::new()),
             net: Mutex::new(NetStats::default()),
             dl_pids: Mutex::new(Vec::new()),
         })
+    }
+
+    async fn ensure_ytdlp(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = self.dependency_lock.lock().await;
+        if !self.ytdlp_path().is_file() {
+            tokio::time::timeout(Duration::from_secs(60),Libraries::new(self.ytdlp_path(), self.ffmpeg_path.clone()).install_youtube())
+                .await.map_err(|_|DownloadFailure::new(FailureKind::Dependency,"yt-dlp installation timeout"))??;
+        }
+        Ok(())
+    }
+    async fn ensure_ffmpeg(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = self.dependency_lock.lock().await;
+        if !self.ffmpeg_path.is_file() {
+            tokio::time::timeout(Duration::from_secs(120),Libraries::new(self.ytdlp_path(), self.ffmpeg_path.clone()).install_ffmpeg())
+                .await.map_err(|_|DownloadFailure::new(FailureKind::Dependency,"FFmpeg installation timeout"))??;
+        }
+        Ok(())
+    }
+    pub async fn repair_cobalt(&self) -> Result<(), String> {
+        let mut companion = self.companion.lock().await;
+        companion.invalidate_install(&self.libs_dir).map_err(|e|e.to_string())?;
+        companion.endpoint(&self.libs_dir).await.map(|_| ()).map_err(|e| e.to_string())
     }
 
     pub fn net_stats(&self) -> (f32, Vec<f32>) {
@@ -104,6 +128,8 @@ impl DownloadEngine {
         };
 
         let mut rows = Vec::new();
+        let status = self.companion.lock().await.display_status(&self.libs_dir);
+        rows.push(("Cobalt 11.7.1".into(), if status.is_empty() { "on demand / sob demanda".into() } else {status}));
         let yt = version(&self.ytdlp_path(), &["--version"])
             .await
             .unwrap_or_else(|| missing_or_corrupt(&self.ytdlp_path()));
@@ -253,4 +279,10 @@ mod tests {
             "cada item deve ser ytsearch1:Artista - Faixa"
         );
     }
+}
+
+/// Cobalt has no metadata-only endpoint. Recover available title from the final file.
+pub fn completed_title(path: &Path) -> String {
+    let tags=read_audio_tags(&path.to_string_lossy());
+    if !tags.title.trim().is_empty() {tags.title} else {path.file_stem().unwrap_or_default().to_string_lossy().to_string()}
 }

@@ -4,6 +4,7 @@ use crate::ui::theme;
 
 pub fn render(app: &mut App, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let s = crate::ui::i18n::s(app.config.lang);
+    if crate::ui::settings_tab::engine_selector(ui, &mut app.config.download_engine, app.config.lang == crate::ui::i18n::Lang::Pt) { app.config.save(); }
 
     theme::page_header(ui, s.queue_title, s.queue_subtitle);
     ui.add_space(20.0);
@@ -103,6 +104,10 @@ fn enqueue_input(app: &mut App) {
 
     for url in lines {
         if queue::is_playlist(&url) {
+            if app.config.download_engine == crate::download::engine::EnginePreference::Cobalt {
+                app.toast("Playlist discovery requires yt-dlp / Descoberta de playlists requer yt-dlp",true);
+                continue;
+            }
             let pt = app.config.lang == crate::ui::i18n::Lang::Pt;
             let yt_pid = queue::playlist_id_from_url(&url);
             let sp_pid = queue::spotify_playlist_id(&url);
@@ -167,6 +172,7 @@ fn enqueue_input(app: &mut App) {
                 format.clone(),
                 quality.clone(),
                 folder.clone(),
+                app.config.download_engine,
             );
         }
     }
@@ -189,6 +195,7 @@ fn enqueue_playlist_fetch(
     pt: bool,
     source: PlaylistSource,
 ) {
+    let preference = app.config.download_engine;
     let jobs = app.queue.jobs.clone();
     let next_id = app.queue.next_id.clone();
     let toasts = app.toast_queue.clone();
@@ -211,7 +218,7 @@ fn enqueue_playlist_fetch(
             Ok(items) if !items.is_empty() => {
                 let n = items.len();
                 for (u, t) in items {
-                    queue::push_job(
+                    queue::push_job_with_engine(
                         &jobs,
                         &next_id,
                         u,
@@ -220,6 +227,7 @@ fn enqueue_playlist_fetch(
                         format.clone(),
                         quality.clone(),
                         folder.clone(),
+                        preference,
                     );
                 }
                 (
@@ -265,6 +273,7 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
         f32,
         u64,
         crate::download::engine::Stage,
+        String,
     )> = app
         .queue
         .jobs
@@ -286,6 +295,7 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
                 j.speed,
                 j.eta,
                 j.stage,
+                j.engine_status.clone(),
             )
         })
         .collect();
@@ -313,7 +323,8 @@ fn render_jobs(app: &mut App, ui: &mut egui::Ui, s: &crate::ui::i18n::Strings) {
 
     theme::card_frame().show(ui, |ui| {
         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-            for (id, title, format, status, progress, speed, eta, stage) in &snapshot {
+            for (id, title, format, status, progress, speed, eta, stage, engine_status) in &snapshot {
+                if !engine_status.is_empty() { ui.label(engine_status); }
                 ui.horizontal(|ui| {
                     let (label, color) = status_label(status, s);
                     ui.add_sized(

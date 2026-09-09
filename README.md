@@ -30,6 +30,7 @@ low memory use.
 
 ### Downloading
 - **Video and audio** from every source `yt-dlp` supports, with format and quality selection
+- **Alternative engine:** local Cobalt companion with automatic fallback or manual selection for direct media links ([details](docs/cobalt.md))
 - **Subtitles**, playlists, and **batch** downloads from a list of links
 - **Spotify metadata** resolved automatically (title/artist) for cleaner filenames
 - **Live stream recording** straight to disk
@@ -74,7 +75,8 @@ cargo build --release
 ```
 
 The `lumen-stream.exe` binary lands in `target/release/`. On first run, the helper binaries
-(`yt-dlp`, `ffmpeg`) are downloaded automatically as needed.
+(`yt-dlp`, `ffmpeg`, and the optional Cobalt companion) are downloaded automatically as needed.
+Packaged Cobalt releases require the companion build and verification steps described in [the build notes](docs/cobalt.md).
 
 ## License
 
